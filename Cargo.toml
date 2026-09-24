@@ -1,0 +1,26 @@
+[package]
+name = "upperadd"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Wayland overlay to jump into markdown notes: fuzzy search, live preview, editor handoff"
+
+[dependencies]
+# gpui-ce fork via git tag (portable form; see /g/gpui-ce/MDRV.md §Registry).
+# Dep keys stay gpui/gpui_platform so `use` paths are unchanged.
+gpui = { package = "mdrv-gpui-ce", git = "https://github.com/mdrv/gpui-ce", tag = "mdrv-gpui-0.0.260925" }
+gpui_platform = { package = "mdrv-gpui-platform", git = "https://github.com/mdrv/gpui-ce", tag = "mdrv-gpui-0.0.260925", features = [
+	"wayland",
+] }
+mdrv-db = "0.5" # engine crate; bump to 0.5.1 + features=["turso"] when the TursoPort export ships
+
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+env_logger = "0.11"
+futures = "0.3"
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+
+[patch.crates-io]
+arrayref = { git = "https://github.com/mdrv/gpui-ce" } # crates.io arrayref is yanked/broken (via tiny-skia)

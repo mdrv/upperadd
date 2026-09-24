@@ -1,3 +1,6 @@
+use std::io::{Read, Write};
+use std::net::Shutdown;
+use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
@@ -50,18 +53,13 @@ pub fn run() -> anyhow::Result<()> {
                 log::debug!("--foreground not passed; foreground is the only mode");
             }
             let cfg = config::load()?;
-            log::info!(
-                "daemon: notes dir {}, socket {} (GUI shell lands in M1)",
-                cfg.notes.dir.display(),
-                socket_path().display()
-            );
-            Ok(())
+            crate::daemon::run(cfg)
         }
-        Command::Toggle => todo_verb("toggle"),
-        Command::Show => todo_verb("show"),
-        Command::Stop => todo_verb("stop"),
-        Command::Status => todo_verb("status"),
-        Command::Reindex => todo_verb("reindex"),
+        Command::Toggle => send_verb("toggle"),
+        Command::Show => send_verb("show"),
+        Command::Stop => send_verb("stop"),
+        Command::Status => send_verb("status"),
+        Command::Reindex => send_verb("reindex"),
     }
 }
 
@@ -69,13 +67,36 @@ pub fn socket_path() -> PathBuf {
     PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap_or_default()).join("upperadd.sock")
 }
 
-/// M1 replaces this with real socket IPC (no auto-spawn: systemd owns the
-/// daemon lifecycle, so a missing socket just means "not running").
-fn todo_verb(verb: &str) -> anyhow::Result<()> {
-    anyhow::bail!(
-        "{verb}: daemon IPC lands in M1 (socket {})",
-        socket_path().display()
-    )
+/// Send a verb to the daemon over `$XDG_RUNTIME_DIR/upperadd.sock`.
+/// Protocol: one verb line in, one `ok <payload>` / `err <message>` line out.
+/// No auto-spawn: systemd owns the daemon lifecycle, so a missing socket
+/// just means "not running" (owner decision, grilling round 1 Q8).
+fn send_verb(verb: &str) -> anyhow::Result<()> {
+    let mut stream = UnixStream::connect(socket_path()).map_err(|_| {
+        anyhow::anyhow!(
+            "upperadd not running (socket {}); start it with: systemctl --user start upperadd",
+            socket_path().display()
+        )
+    })?;
+    stream
+        .write_all(verb.as_bytes())
+        .and_then(|_| stream.shutdown(Shutdown::Write))?;
+    let mut resp = String::new();
+    stream.read_to_string(&mut resp)?;
+    let resp = resp.trim();
+    match resp.strip_prefix("ok") {
+        Some(payload) => {
+            let payload = payload.trim();
+            if !payload.is_empty() {
+                println!("{payload}");
+            }
+            Ok(())
+        }
+        None => Err(anyhow::anyhow!(
+            "{}",
+            resp.strip_prefix("err").unwrap_or(resp).trim()
+        )),
+    }
 }
 
 #[cfg(test)]

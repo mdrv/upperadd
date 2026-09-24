@@ -1,0 +1,13 @@
+[Unit]
+Description=upperadd — markdown notes overlay daemon (search / preview / editor handoff)
+After=graphical-session.target
+
+[Service]
+ExecStart=/x/g/upperadd/target/release/upperadd daemon start --foreground
+Restart=on-failure
+RestartPreventExitStatus=1
+RestartSec=2
+Environment=WAYLAND_DISPLAY=wayland-1
+
+[Install]
+WantedBy=default.target

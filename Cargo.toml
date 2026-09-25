@@ -12,7 +12,7 @@ gpui = { package = "mdrv-gpui-ce", git = "https://github.com/mdrv/gpui-ce", tag 
 gpui_platform = { package = "mdrv-gpui-platform", git = "https://github.com/mdrv/gpui-ce", tag = "mdrv-gpui-0.0.260925.4", features = [
 	"wayland",
 ] }
-mdrv-db = "0.5" # engine crate; bump to 0.5.1 + features=["turso"] when the TursoPort export ships
+mdrv-db = { version = "0.5.1", features = ["turso"] } # engine crate; TursoPort via the 0.5.1 export
 
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

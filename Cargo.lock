@@ -3770,9 +3770,9 @@ dependencies = [
 
 [[package]]
 name = "mdrv-db"
-version = "0.5.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c93c50a50bcd6d7561610a2759ea7524a97a7ae1d9de64c3c6920ee0745e7113"
+checksum = "18c3b6d61d5900b745f3106ebe0249774c0bb04185524f28084fe191085f0461"
 dependencies = [
  "axum",
  "blake3",
@@ -5425,7 +5425,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.12.1",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",

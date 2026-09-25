@@ -142,6 +142,21 @@ impl Db {
         Ok(rows.first().and_then(|r| r["n"].as_u64()).unwrap_or(0))
     }
 
+    /// One section's content, for the preview pane.
+    pub fn section_content(&self, path: &str, line: u32) -> Result<Option<String>> {
+        let rows = self.select(
+            format!("SELECT content FROM {SECTIONS} WHERE path = ? AND line = ?"),
+            vec![
+                PortValue::Text(path.into()),
+                PortValue::Int(i64::from(line)),
+            ],
+        )?;
+        Ok(rows
+            .first()
+            .and_then(|r| r["content"].as_str())
+            .map(String::from))
+    }
+
     /// Existing rows for one path as a hash → section_mtime carry map.
     pub fn mtime_carry(&self, path: &str) -> Result<std::collections::HashMap<String, i64>> {
         let rows = self.select(

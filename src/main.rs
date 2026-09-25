@@ -3,6 +3,7 @@ mod config;
 mod daemon;
 mod db;
 mod index;
+mod markdown;
 mod overlay;
 mod search;
 mod sticky;

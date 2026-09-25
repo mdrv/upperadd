@@ -1,11 +1,13 @@
 use futures::channel::mpsc::UnboundedSender;
 use gpui::{
     actions, div, hsla, layer_shell::KeyboardInteractivity, prelude::*, px, relative, uniform_list,
-    white, Context, FocusHandle, Global, KeyDownEvent, Pixels, Point, Render,
-    ScrollStrategy, UniformListScrollHandle, Window, WindowHandle,
+    white, Context, FocusHandle, FontStyle, Global, HighlightStyle, InteractiveElement,
+    KeyDownEvent, Pixels, Point, Render, ScrollStrategy, StrikethroughStyle, StyledText,
+    UnderlineStyle, UniformListScrollHandle, Window, WindowHandle, FontWeight,
 };
 
 use crate::config::Config;
+use crate::markdown::{self, Block, BlockKind, Inline};
 use crate::search::{Mode, SearchModel};
 use crate::worker::IndexCmd;
 
@@ -29,6 +31,8 @@ pub struct Overlay {
     /// Output origin (global layout coords) handed to pinned stickies.
     origin: Point<Pixels>,
     pins: usize,
+    /// Rendered note content: ((path, line) → markdown source).
+    preview: Option<((String, u32), String)>,
 }
 
 impl Overlay {
@@ -47,6 +51,7 @@ impl Overlay {
             index_tx,
             origin,
             pins: 0,
+            preview: None,
         }
     }
 
@@ -98,6 +103,7 @@ impl Overlay {
             if let Ok(results) = rx.await {
                 this.update(cx, |ov, cx| {
                     if ov.search.apply_results(results, generation) {
+                        ov.request_preview(cx);
                         cx.notify();
                     }
                 })
@@ -146,6 +152,7 @@ impl Overlay {
                     }
                     "up" => {
                         if self.move_selection(-1) {
+                            self.request_preview(cx);
                             cx.notify();
                         }
                         cx.stop_propagation();
@@ -153,6 +160,7 @@ impl Overlay {
                     }
                     "down" => {
                         if self.move_selection(1) {
+                            self.request_preview(cx);
                             cx.notify();
                         }
                         cx.stop_propagation();
@@ -183,12 +191,14 @@ impl Overlay {
                 "escape" => {}
                 "j" | "down" => {
                     if self.move_selection(1) {
+                        self.request_preview(cx);
                         cx.notify();
                     }
                     cx.stop_propagation();
                 }
                 "k" | "up" => {
                     if self.move_selection(-1) {
+                        self.request_preview(cx);
                         cx.notify();
                     }
                     cx.stop_propagation();
@@ -217,6 +227,52 @@ impl Overlay {
                 }
             },
         }
+    }
+
+    /// Fetch the selected section's content for the preview pane. Replies
+    /// are applied only if the selection hasn't moved since the request.
+    fn request_preview(&mut self, cx: &mut Context<Self>) {
+        let Some(hit) = self.search.results.get(self.search.selected) else {
+            self.preview = None;
+            return;
+        };
+        let key = (hit.path.clone(), hit.line);
+        if self
+            .preview
+            .as_ref()
+            .is_some_and(|(k, _)| *k == key)
+        {
+            return;
+        }
+        let (tx, rx) = futures::channel::oneshot::channel();
+        if self
+            .index_tx
+            .unbounded_send(IndexCmd::Section {
+                path: key.0.clone(),
+                line: key.1,
+                resp: tx,
+            })
+            .is_err()
+        {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            if let Ok(content) = rx.await {
+                this.update(cx, |ov, cx| {
+                    let still_selected = ov
+                        .search
+                        .results
+                        .get(ov.search.selected)
+                        .is_some_and(|h| (h.path.clone(), h.line) == key);
+                    if still_selected {
+                        ov.preview = Some((key, content.unwrap_or_default()));
+                        cx.notify();
+                    }
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
     /// Move the selection and keep it in view.
@@ -389,6 +445,151 @@ impl Overlay {
             .child(self.render_results(cx))
             .child(self.render_status())
     }
+
+    fn render_preview(&self) -> gpui::AnyElement {
+        let Some((_, content)) = &self.preview else {
+            return div()
+                .flex_1()
+                .h_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(hsla(0.0, 0.0, 0.75, 0.3))
+                        .child("select a note"),
+                )
+                .into_any_element();
+        };
+        let blocks = markdown::parse(content);
+        div()
+            .id("preview")
+            .flex_1()
+            .h_full()
+            .flex()
+            .flex_col()
+            .gap_2p5()
+            .px(px(20.0))
+            .py(px(16.0))
+            .overflow_y_scroll()
+            .children(blocks.iter().map(|b| self.render_block(b)))
+            .into_any_element()
+    }
+
+    fn render_block(&self, block: &Block) -> gpui::AnyElement {
+        match block {
+            Block::Rule => div()
+                .h(px(1.0))
+                .w_full()
+                .bg(hsla(0.0, 0.0, 1.0, 0.12))
+                .into_any_element(),
+            Block::Code { code } => div()
+                .font_family(".monospace")
+                .text_size(px(11.5))
+                .text_color(hsla(0.0, 0.0, 0.85, 0.9))
+                .bg(hsla(0.0, 0.0, 1.0, 0.05))
+                .rounded(px(6.0))
+                .px(px(10.0))
+                .py(px(8.0))
+                .child(code.clone())
+                .into_any_element(),
+            Block::Styled { kind, text, spans } => {
+                let line = div().child(self.styled_line(text, spans));
+                let block = match kind {
+                    BlockKind::Heading(level) => {
+                        let size = match level {
+                            1 => 20.0,
+                            2 => 17.0,
+                            3 => 15.0,
+                            _ => 13.5,
+                        };
+                        line.text_size(px(size)).font_weight(FontWeight::BOLD)
+                    }
+                    BlockKind::Paragraph => {
+                        line.text_size(px(13.0)).line_height(relative(1.5))
+                    }
+                    BlockKind::Quote => line
+                        .text_size(px(13.0))
+                        .line_height(relative(1.5))
+                        .border_l_2()
+                        .border_color(hsla(220.0, 0.5, 0.55, 0.8))
+                        .pl(px(10.0))
+                        .text_color(hsla(0.0, 0.0, 0.85, 0.7)),
+                    BlockKind::Item => line.text_size(px(13.0)),
+                };
+                if *kind == BlockKind::Item {
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_size(px(13.0))
+                                .text_color(hsla(220.0, 0.5, 0.65, 0.9))
+                                .child("•"),
+                        )
+                        .child(block)
+                        .into_any_element()
+                } else {
+                    block.into_any_element()
+                }
+            }
+        }
+    }
+
+    /// One block's text with inline highlight spans applied.
+    fn styled_line(&self, text: &str, spans: &[(std::ops::Range<usize>, Inline)]) -> StyledText {
+        if spans.is_empty() {
+            return StyledText::new(text.to_string());
+        }
+        StyledText::new(text.to_string()).with_highlights(
+            spans
+                .iter()
+                .map(|(range, inline)| (range.clone(), self.highlight(*inline))),
+        )
+    }
+
+    fn highlight(&self, inline: Inline) -> HighlightStyle {
+        let none = HighlightStyle {
+            color: None,
+            font_weight: None,
+            font_style: None,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+            fade_out: None,
+        };
+        match inline {
+            Inline::Bold => HighlightStyle {
+                font_weight: Some(FontWeight::BOLD),
+                ..none
+            },
+            Inline::Italic => HighlightStyle {
+                font_style: Some(FontStyle::Italic),
+                ..none
+            },
+            Inline::Code => HighlightStyle {
+                background_color: Some(hsla(0.0, 0.0, 1.0, 0.10)),
+                ..none
+            },
+            Inline::Strike => HighlightStyle {
+                strikethrough: Some(StrikethroughStyle {
+                    thickness: px(1.0),
+                    color: None,
+                }),
+                ..none
+            },
+            Inline::Link => HighlightStyle {
+                color: Some(hsla(215.0, 0.6, 0.7, 1.0)),
+                underline: Some(UnderlineStyle {
+                    thickness: px(1.0),
+                    color: None,
+                    wavy: false,
+                }),
+                ..none
+            },
+        }
+    }
 }
 
 impl Render for Overlay {
@@ -430,20 +631,7 @@ impl Render for Overlay {
                     .text_color(white())
                     // fzf layout (spec 00): left search+results, right preview.
                     .child(self.render_left_panel(cx))
-                    .child(
-                        div()
-                            .flex_1()
-                            .h_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .text_color(hsla(0.0, 0.0, 0.75, 0.3))
-                                    .child("preview lands with M3"),
-                            ),
-                    ),
+                    .child(self.render_preview()),
             )
     }
 }

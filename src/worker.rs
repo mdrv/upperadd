@@ -33,6 +33,12 @@ pub enum IndexCmd {
     Stats {
         resp: oneshot::Sender<String>,
     },
+    /// One section's content for the preview pane.
+    Section {
+        path: String,
+        line: u32,
+        resp: oneshot::Sender<Option<String>>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -127,6 +133,9 @@ fn drain_degraded(mut rx: UnboundedReceiver<IndexCmd>) {
             IndexCmd::Search { resp, .. } => {
                 let _ = resp.send(Vec::new());
             }
+            IndexCmd::Section { resp, .. } => {
+                let _ = resp.send(None);
+            }
             IndexCmd::Reindex | IndexCmd::FilesChanged(_) => {}
         }
     }
@@ -198,6 +207,10 @@ impl Worker {
             }
             IndexCmd::Search { query, resp } => {
                 let _ = resp.send(self.search(&query));
+            }
+            IndexCmd::Section { path, line, resp } => {
+                let content = self.db.section_content(&path, line).ok().flatten();
+                let _ = resp.send(content);
             }
             IndexCmd::Stats { resp } => {
                 let _ = resp.send(self.stats());

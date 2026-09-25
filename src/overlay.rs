@@ -1,17 +1,17 @@
+use std::time::{Duration, Instant};
+
 use futures::channel::mpsc::UnboundedSender;
 use gpui::{
-    actions, div, hsla, layer_shell::KeyboardInteractivity, prelude::*, px, relative, uniform_list,
-    white, Context, FocusHandle, FontStyle, Global, HighlightStyle, InteractiveElement,
-    KeyDownEvent, Pixels, Point, Render, ScrollStrategy, StrikethroughStyle, StyledText,
-    UnderlineStyle, UniformListScrollHandle, Window, WindowHandle, FontWeight,
+    div, hsla, layer_shell::KeyboardInteractivity, prelude::*, px, relative, uniform_list, white,
+    Context, FocusHandle, FontStyle, Global, HighlightStyle, InteractiveElement, KeyDownEvent,
+    Pixels, Point, Render, ScrollStrategy, StrikethroughStyle, StyledText, UnderlineStyle,
+    UniformListScrollHandle, Window, WindowHandle, FontWeight,
 };
 
 use crate::config::Config;
 use crate::markdown::{self, Block, BlockKind, Inline};
 use crate::search::{Mode, SearchModel};
 use crate::worker::IndexCmd;
-
-actions!(upperadd, [Hide]);
 
 /// App-global handle to the persistent overlay window (§16.9: exactly one,
 /// never destroyed) so IPC tasks and key handlers can reach it.
@@ -33,6 +33,8 @@ pub struct Overlay {
     pins: usize,
     /// Rendered note content: ((path, line) → markdown source).
     preview: Option<((String, u32), String)>,
+    /// Transient status-bar feedback: (message, shown-at).
+    notice: Option<(&'static str, Instant)>,
 }
 
 impl Overlay {
@@ -52,6 +54,7 @@ impl Overlay {
             origin,
             pins: 0,
             preview: None,
+            notice: None,
         }
     }
 
@@ -73,9 +76,16 @@ impl Overlay {
         cx.notify();
     }
 
-    /// Esc. §16.8: surface mutations from inside a window update silently
-    /// no-op — defer past the update, then mutate through the window handle.
-    fn on_hide(&mut self, _: &Hide, _window: &mut Window, cx: &mut Context<Self>) {
+    /// Hide the overlay (normal-mode Esc). §16.8: surface mutations from
+    /// inside a window update silently no-op — defer past the update, then
+    /// mutate through the window handle.
+    ///
+    /// This is a plain key-handler path, not an action: a bound
+    /// `escape`→Hide action fired *alongside* `on_key_down` regardless of
+    /// `stop_propagation`, so insert-Esc hid the overlay instead of
+    /// stepping back to normal mode. With no escape binding anywhere, the
+    /// key handler owns Esc completely (insert consumes, normal hides).
+    fn hide(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if !self.visible {
             return;
         }
@@ -113,7 +123,7 @@ impl Overlay {
         .detach();
     }
 
-    fn on_key(&mut self, ev: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let ks = &ev.keystroke;
         let mods = ks.modifiers;
         let plain = !mods.control && !mods.alt && !mods.platform;
@@ -131,8 +141,8 @@ impl Overlay {
             Mode::Insert => {
                 let mut query_changed = false;
                 match ks.key.as_str() {
-                    // Two-stage Esc (spec 01): insert → normal. Consumed here
-                    // so the global escape→Hide action does not fire.
+                    // Two-stage Esc (spec 01): insert → normal. Consumed
+                    // here so Esc never hides the overlay from insert mode.
                     "escape" => {
                         self.search.enter_normal();
                         cx.stop_propagation();
@@ -187,8 +197,12 @@ impl Overlay {
                 cx.notify();
             }
             Mode::Normal => match ks.key.as_str() {
-                // Second Esc stage: don't consume → the bound Hide action fires.
-                "escape" => {}
+                // Second Esc stage: hide. `stop_propagation` is belt and
+                // suspenders — no other escape handler exists anymore.
+                "escape" => {
+                    self.hide(window, cx);
+                    cx.stop_propagation();
+                }
                 "j" | "down" => {
                     if self.move_selection(1) {
                         self.request_preview(cx);
@@ -210,6 +224,29 @@ impl Overlay {
                 }
                 "i" | "enter" => {
                     self.search.enter_insert();
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+                // Shift+R: full reindex from the vault (same as `ua reindex`).
+                // Plain `r` falls through to the printable arm (types `r`).
+                "r" | "R" if mods.shift || ks.key == "R" => {
+                    let _ = self.index_tx.unbounded_send(IndexCmd::Reindex);
+                    self.notice = Some(("reindexing vault…", Instant::now()));
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(Duration::from_secs(2))
+                            .await;
+                        this.update(cx, |ov, cx| {
+                            if let Some((_, at)) = ov.notice {
+                                if at.elapsed() >= Duration::from_secs(2) {
+                                    ov.notice = None;
+                                    cx.notify();
+                                }
+                            }
+                        })
+                        .ok();
+                    })
+                    .detach();
                     cx.stop_propagation();
                     cx.notify();
                 }
@@ -409,11 +446,17 @@ impl Overlay {
                 div()
                     .text_size(px(10.5))
                     .text_color(hsla(0.0, 0.0, 0.75, 0.5))
-                    .child(format!(
-                        "{} result{} · Esc⇥normal · j/k move · P pin",
-                        self.search.len(),
-                        if self.search.len() == 1 { "" } else { "s" }
-                    )),
+                    .child(match self.notice {
+                        // Fresh notice replaces the hints for its lifetime.
+                        Some((msg, at)) if at.elapsed() < Duration::from_secs(2) => {
+                            msg.to_string()
+                        }
+                        _ => format!(
+                            "{} result{} · Esc⇥normal · j/k move · P pin · ⇧R reindex",
+                            self.search.len(),
+                            if self.search.len() == 1 { "" } else { "s" }
+                        ),
+                    }),
             )
             .child(
                 div()
@@ -613,7 +656,6 @@ impl Render for Overlay {
             .justify_end()
             .items_start()
             .track_focus(&self.focus)
-            .on_action(cx.listener(Self::on_hide))
             .on_key_down(cx.listener(Self::on_key))
             .child(
                 div()

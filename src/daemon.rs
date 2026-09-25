@@ -6,7 +6,7 @@ use futures::channel::mpsc::{UnboundedSender, unbounded};
 use futures::channel::oneshot;
 use futures::StreamExt;
 use gpui::{
-    App, AppContext, AsyncApp, Bounds, DisplayId, KeyBinding, Pixels, Point, PlatformDisplay,
+    App, AppContext, AsyncApp, Bounds, DisplayId, Pixels, Point, PlatformDisplay,
     WindowBounds, WindowBackgroundAppearance, WindowKind, WindowOptions, layer_shell::*, point,
     px, size,
 };
@@ -15,7 +15,7 @@ use log::warn;
 
 use crate::cli::socket_path;
 use crate::config::{Config, NamedOutput, OutputSpec};
-use crate::overlay::{Hide, Overlay, OverlayGlobal};
+use crate::overlay::{Overlay, OverlayGlobal};
 use crate::worker::{self, IndexCmd};
 
 /// Verbs the socket thread forwards into the gpui UI task.
@@ -46,8 +46,6 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
     let ui_index_tx = index_tx.clone();
 
     application().run(move |cx: &mut App| {
-        cx.bind_keys(vec![KeyBinding::new("escape", Hide, None)]);
-
         std::thread::spawn(move || accept_loop(listener, tx, index_tx));
 
         // §16.9: ONE persistent window, created hidden (show: false), never

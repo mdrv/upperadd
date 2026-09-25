@@ -15,10 +15,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui::{
-    div, hsla, img, prelude::*, px, relative, AnyElement, Div, FontStyle, FontWeight,
-    HighlightStyle, StrikethroughStyle, StyledText, UnderlineStyle,
+    div, hsla, hsla_to_rgba, img, prelude::*, px, relative, AnyElement, Div, FontStyle, FontWeight,
+    HighlightStyle, Hsla, StrikethroughStyle, StyledText, UnderlineStyle,
 };
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+
+use crate::config::Fonts;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Inline {
@@ -263,15 +265,37 @@ fn trim_tail(text: &mut String) {
 /// Render parsed blocks as a gap-separated column. Callers own the outer
 /// container (padding, scrolling); `base` is the directory relative image
 /// URLs resolve against (the note's directory).
-pub fn render_blocks(blocks: &[Block], base: &Path) -> Div {
+pub fn render_blocks(blocks: &[Block], base: &Path, fonts: &Fonts) -> Div {
     div()
         .flex()
         .flex_col()
         .gap_2p5()
-        .children(blocks.iter().map(|b| render_block(b, base)))
+        .children(blocks.iter().map(|b| render_block(b, base, fonts)))
 }
 
-fn render_block(block: &Block, base: &Path) -> AnyElement {
+/// Pick black or white for text on `bg` by the WCAG contrast ratio computed
+/// on real sRGB luminance — what CSS `contrast-color()`'s naive rule gets
+/// wrong on mid-tones. Call with an OPAQUE background: translucent colors
+/// composite over unknown pixels, so no static choice is reliable there.
+pub fn contrast_text(bg: Hsla) -> Hsla {
+    let rgba = hsla_to_rgba(bg);
+    let lin = |c: f32| {
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let lum = 0.2126 * lin(rgba.red) + 0.7152 * lin(rgba.green) + 0.0722 * lin(rgba.blue);
+    // ratio(white) = 1.05/(L+.05) vs ratio(black) = (L+.05)/.05
+    if 1.05 / (lum + 0.05) >= (lum + 0.05) / 0.05 {
+        hsla(0.0, 0.0, 1.0, 1.0)
+    } else {
+        hsla(0.0, 0.0, 0.0, 1.0)
+    }
+}
+
+fn render_block(block: &Block, base: &Path, fonts: &Fonts) -> AnyElement {
     match block {
         Block::Rule => div()
             .h(px(1.0))
@@ -279,7 +303,7 @@ fn render_block(block: &Block, base: &Path) -> AnyElement {
             .bg(hsla(0.0, 0.0, 1.0, 0.12))
             .into_any_element(),
         Block::Code { code } => div()
-            .font_family(".monospace")
+            .font_family(fonts.monospace.clone())
             .text_size(px(11.5))
             .text_color(hsla(0.0, 0.0, 0.85, 0.9))
             .bg(hsla(0.0, 0.0, 1.0, 0.05))
@@ -290,7 +314,13 @@ fn render_block(block: &Block, base: &Path) -> AnyElement {
             .into_any_element(),
         Block::Image { url, alt } => render_image(url, alt, base),
         Block::Styled { kind, text, spans } => {
-            let line = div().child(styled_line(text, spans));
+            let family = match kind {
+                BlockKind::Heading(_) => fonts.heading.clone(),
+                _ => fonts.body.clone(),
+            };
+            let line = div()
+                .font_family(family)
+                .child(styled_line(text, spans, fonts));
             let block = match kind {
                 BlockKind::Heading(level) => {
                     let size = match level {
@@ -366,15 +396,24 @@ fn note(text: &str) -> AnyElement {
         .into_any_element()
 }
 
-/// One block's text with inline highlight spans applied.
-fn styled_line(text: &str, spans: &[(Range<usize>, Inline)]) -> StyledText {
+/// One block's text with inline highlight spans applied; inline code spans
+/// get the configured monospace family via font-family overrides (the
+/// surrounding div keeps the body/heading family).
+fn styled_line(text: &str, spans: &[(Range<usize>, Inline)], fonts: &Fonts) -> StyledText {
+    let line = StyledText::new(text.to_string());
     if spans.is_empty() {
-        return StyledText::new(text.to_string());
+        return line;
     }
-    StyledText::new(text.to_string()).with_highlights(
+    line.with_highlights(
         spans
             .iter()
             .map(|(range, inline)| (range.clone(), highlight(*inline))),
+    )
+    .with_font_family_overrides(
+        spans
+            .iter()
+            .filter(|(_, inline)| *inline == Inline::Code)
+            .map(|(range, _)| (range.clone(), fonts.monospace.clone().into())),
     )
 }
 

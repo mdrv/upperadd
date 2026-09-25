@@ -14,6 +14,7 @@ pub struct Config {
     pub window: Window,
     pub sections: Sections,
     pub editor: Editor,
+    pub fonts: Fonts,
 }
 
 impl Default for Config {
@@ -23,6 +24,30 @@ impl Default for Config {
             window: Window::default(),
             sections: Sections::default(),
             editor: Editor::default(),
+            fonts: Fonts::default(),
+        }
+    }
+}
+
+/// Font families for note rendering. Defaults are installed on the dev
+/// machine (fc-list); a missing family falls back to the gpui default.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct Fonts {
+    /// Paragraphs, quotes, list items, UI chrome.
+    pub body: String,
+    /// Headings.
+    pub heading: String,
+    /// Code blocks and inline code spans.
+    pub monospace: String,
+}
+
+impl Default for Fonts {
+    fn default() -> Self {
+        Self {
+            body: "IBM Plex Sans".into(),
+            heading: "Fira Sans".into(),
+            monospace: "JetBrains Mono".into(),
         }
     }
 }

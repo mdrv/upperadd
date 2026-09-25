@@ -542,8 +542,12 @@ impl Overlay {
                     .rounded(px(4.0))
                     .text_size(px(10.0))
                     .when(insert, |d| {
-                        d.bg(hsla(220.0, 0.5, 0.45, 0.8))
-                            .text_color(hsla(220.0, 0.2, 0.10, 1.0))
+                        // Opaque accent bg: translucent colors composite over
+                        // unknown wallpaper pixels, so contrast would be a
+                        // gamble (the black-on-brown chip). Text color comes
+                        // from the WCAG ratio on the real luminance.
+                        let bg = hsla(220.0, 0.5, 0.45, 1.0);
+                        d.bg(bg).text_color(markdown::contrast_text(bg))
                     })
                     .when(!insert, |d| {
                         d.bg(hsla(0.0, 0.0, 1.0, 0.12))
@@ -605,7 +609,7 @@ impl Overlay {
             .px(px(20.0))
             .py(px(16.0))
             .overflow_y_scroll()
-            .child(markdown::render_blocks(&blocks, &base))
+            .child(markdown::render_blocks(&blocks, &base, &self.cfg.fonts))
             .into_any_element()
     }
 }

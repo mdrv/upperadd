@@ -624,6 +624,7 @@ impl Render for Sticky {
                     .child(markdown::render_blocks(
                         &markdown::parse(&self.body),
                         &self.note_dir(),
+                        &self.cfg.fonts,
                     )),
             )
             .child(self.render_footer(cx))

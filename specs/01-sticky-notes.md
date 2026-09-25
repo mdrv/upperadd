@@ -17,14 +17,19 @@ be pinned at once. A sticky never takes the keyboard
 
 - **Drag = fork patch `Window::set_margin`** (runtime setter + immediate
   commit; tag `mdrv-gpui-0.0.260925.1`; documented in `/g/gpui-ce/MDRV.md`).
-  An unanchored `Layer::Top` surface is positioned entirely by its margins
-  (CSS order top/right/bottom/left), so dragging = pointer-delta → margin
-  updates. Compositors do not move layer surfaces for you; `start_window_move`
-  is xdg-only and a normal toplevel cannot stay on top on Wayland.
-  Known limitation: pointer events stop when the cursor leaves the surface
-  mid-drag (layer surfaces have no pointer grab); the drag resumes when the
-  cursor re-enters. Accepted for v1; revisit only if it annoys in practice.
-- **Window shape**: `Layer::Top`, `Anchor::empty()`, `exclusive_zone: -1`,
+  A `TOP | LEFT`-anchored `Layer::Top` surface is positioned entirely by its
+  margins (CSS order top/right/bottom/left). Compositors do not move layer
+  surfaces for you; `start_window_move` is xdg-only and a normal toplevel
+  cannot stay on top on Wayland. **Drag is poll-based** (ground truth, not
+  pointer events): `offset = −press_local` at press, 16 ms `hyprctl
+  cursorpos` polls → target → one `set_margin` per frame from `render`,
+  pointer-leave detected from the same rect check with a 250 ms grace.
+  Event-driven drag wiggles (surface-local coords + commit-rate mismatch)
+  and stalls on flings — pattern documented in
+  `/x/m/v270/gpui-ce/gpui-ce.md` §6 and `docs/01`.
+- **Window shape**: `Layer::Top`, `Anchor::TOP | Anchor::LEFT`
+  (`Anchor::empty()` misbehaves — compositors center unanchored layer
+  surfaces), `exclusive_zone: -1`,
   keyboard None, fixed 420×560 (resize = hand-rolled edge drag, later),
   `app_id`/namespace `upperadd-sticky` (README documents
   `layerrule blur, upperadd-sticky` at M4). Explicit size in

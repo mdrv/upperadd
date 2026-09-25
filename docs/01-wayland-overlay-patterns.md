@@ -22,30 +22,41 @@ The §16.2 fallback (empty render + `set_input_region(Some(&[]))`) is
 
 ## Drag via runtime `set_margin` (fork patch, tag 0.0.260925.1)
 
-Unanchored layer surface + `margin = position` + pointer-delta updates:
-works, commits land immediately (same pattern as the other runtime
-setters — apply then `surface.commit()`).
+`Anchor::TOP | Anchor::LEFT` + `margin = position` + `Window::set_margin`
+(commits immediately, like the other runtime setters). Final form after
+three failed event-driven attempts: **poll-based ground-truth drag**.
+Event-driven drag cannot be made smooth:
 
-- Set margins from the **drag start** position + accumulated delta, not
-  from incremental deltas (rounding drift compounds).
-- **Pointer-leave limitation is real**: Wayland sends `pointer_leave`
-  when the cursor exits the surface, so a fast drag stalls until
-  re-entry. Acceptable for sticky-note-sized drags; do not build
-  fling-drag UIs on this.
-- Unanchored + explicit `window_bounds` size is the correct combo
-  (§16.3's "pass 0×0" rule applies only when all four anchors are set).
-- `MouseMoveEvent::pressed_button` is `Option<MouseButton>` in this fork,
-  not a bitflags set — guard with `!= Some(MouseButton::Left)`.
-- **Event positions are surface-local, and the surface moves under the
-  cursor while you re-margin it** (origin(k) == pos(k)). Computing
-  `pos(start) + (event - press)` compounds the shift and the panel lags
-  the cursor, converging asymptotically. Correct update per event:
-  `pos(k+1) = pos(k) + (local(k+1) - local(press))` — accumulate against
-  the _current_ pos with the press-local reference held fixed.
-- Anchor the surface `TOP | LEFT` rather than leaving it unanchored:
-  compositors center unanchored layer surfaces and margin behavior for
-  them is not the documented-offset behavior you want; anchored edges
-  always honor margins.
+- Event positions are **surface-local**, and the surface moves under the
+  cursor as each margin lands (origin(k) == pos(k)) — start+delta lags the
+  cursor, and per-event accumulation feeds unapplied deltas back into the
+  origin estimate (events ~1000 Hz, margin commits ~frame rate) → wiggle.
+- Fast flings exit the surface, pointer events stop (no pointer grab on
+  layer surfaces) → the drag stalls.
+
+The working pattern (implemented in `src/sticky.rs`):
+
+1. At press: `offset = −press_local` (surface origin == pos at press, so
+   `cursor_global = pos + press_local`; keep `pos = cursor_global + offset`
+   for the whole drag).
+2. Poll the global cursor every ~16 ms while dragging (`hyprctl cursorpos`;
+   global coords → subtract the output origin from
+   `PlatformDisplay::bounds().origin` to get margin space), compute the
+   target, `cx.notify()` only on change.
+3. Frame-gate `set_margin` in `render()` — at most one call per frame, and
+   only when the polled position actually moved.
+4. Pointer-leave from the same ground truth: cursor inside the surface rect
+   = still dragging; outside = 250 ms grace, then end. Surface events are
+   safety nets only (cancel when a move arrives with no button pressed).
+
+Result: 1:1 tracking, no wiggle, fling-proof. Verified via synthetic input
+(ydotool) + `hyprctl layers -j` position readback.
+
+Also true: `MouseMoveEvent::pressed_button` is `Option<MouseButton>` in
+this fork — guard with `!= Some(MouseButton::Left)`. Anchor `TOP | LEFT`,
+never unanchored (compositors center unanchored layer surfaces and their
+margins don't behave). Explicit `window_bounds` size is correct here
+(§16.3's 0×0 rule is the all-four-anchors case).
 
 ## Cursor output resolution (no gpui cursor API)
 

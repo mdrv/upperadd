@@ -1,11 +1,13 @@
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::rc::Rc;
 
 use futures::channel::mpsc::{UnboundedSender, unbounded};
 use futures::StreamExt;
 use gpui::{
-    App, AppContext, AsyncApp, Bounds, DisplayId, KeyBinding, WindowBounds,
-    WindowBackgroundAppearance, WindowKind, WindowOptions, layer_shell::*, point, px, size,
+    App, AppContext, AsyncApp, Bounds, DisplayId, KeyBinding, Pixels, Point, PlatformDisplay,
+    WindowBounds, WindowBackgroundAppearance, WindowKind, WindowOptions, layer_shell::*, point,
+    px, size,
 };
 use gpui_platform::application;
 use log::warn;
@@ -46,7 +48,10 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
 
         // §16.9: ONE persistent window, created hidden (show: false), never
         // destroyed; Layer::Top per AGENTS.md fork rules.
-        let display_id = resolve_display_id(cx, cfg.window.output);
+        let (display_id, output_origin) = match resolve_display(cx, cfg.window.output) {
+            Some((id, origin)) => (Some(id), origin),
+            None => (None, point(px(0.), px(0.))),
+        };
         let overlay_cfg = cfg.clone();
         let options = WindowOptions {
             titlebar: None,
@@ -94,10 +99,15 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
                     Ipc::PinTest => {
                         pins += 1;
                         let index = pins;
+                        let origin = output_origin;
                         cx.update(|app| {
-                            if let Err(err) =
-                                crate::sticky::spawn(app, &cfg, format!("Pinned test #{index}"), index)
-                            {
+                            if let Err(err) = crate::sticky::spawn(
+                                app,
+                                &cfg,
+                                format!("Pinned test #{index}"),
+                                index,
+                                origin,
+                            ) {
                                 warn!("spawning sticky: {err:#}");
                             }
                         });
@@ -158,27 +168,37 @@ fn forward(tx: &UnboundedSender<Ipc>, msg: Ipc) -> Result<String, String> {
     tx.unbounded_send(msg).map(|_| String::new()).map_err(|_| "shutting down".into())
 }
 
-fn resolve_display_id(cx: &App, spec: OutputSpec) -> Option<DisplayId> {
-    match spec {
-        OutputSpec::Index(i) => cx.displays().get(i).map(|d| d.id()),
-        OutputSpec::Named(NamedOutput::Primary) => cx.primary_display().map(|d| d.id()),
+/// The display a new window should land on: (id, layout origin).
+fn resolve_display(cx: &App, spec: OutputSpec) -> Option<(DisplayId, Point<Pixels>)> {
+    let display = match spec {
+        OutputSpec::Index(i) => cx.displays().into_iter().nth(i)?,
+        OutputSpec::Named(NamedOutput::Primary) => cx.primary_display()?,
         OutputSpec::Named(NamedOutput::Cursor) => match hypr_cursor_display(cx) {
-            Some(id) => Some(id),
+            Some(display) => display,
             None => {
                 warn!("could not resolve cursor output via hyprctl; falling back to primary");
-                cx.primary_display().map(|d| d.id())
+                cx.primary_display()?
             }
         },
-    }
+    };
+    Some((display.id(), display.bounds().origin))
+}
+
+/// Global cursor position (layout coordinates) via Hyprland IPC — ground
+/// truth for sticky drags, independent of surface-local origin shifts.
+/// None when not under Hyprland.
+pub fn hypr_cursor_global() -> Option<Point<Pixels>> {
+    let pos = run_capture("hyprctl", &["cursorpos"])?;
+    let (x, y) = pos.trim().split_once(',')?;
+    Some(point(px(x.trim().parse::<f32>().ok()?), px(y.trim().parse::<f32>().ok()?)))
 }
 
 /// gpui has no cursor-position API; under Hyprland, map the cursor to the
 /// monitor containing it, then match that monitor's origin against gpui's
 /// display bounds (both are global compositor coordinates).
-fn hypr_cursor_display(cx: &App) -> Option<DisplayId> {
-    let pos = run_capture("hyprctl", &["cursorpos"])?;
-    let (x, y) = pos.trim().split_once(',')?;
-    let (cx_, cy_): (f32, f32) = (x.trim().parse().ok()?, y.trim().parse().ok()?);
+fn hypr_cursor_display(cx: &App) -> Option<Rc<dyn PlatformDisplay>> {
+    let cursor = hypr_cursor_global()?;
+    let (cx_, cy_) = (f32::from(cursor.x), f32::from(cursor.y));
 
     let json = run_capture("hyprctl", &["monitors", "-j"])?;
     let monitors: serde_json::Value = serde_json::from_str(&json).ok()?;
@@ -192,13 +212,11 @@ fn hypr_cursor_display(cx: &App) -> Option<DisplayId> {
     })?;
     let (mx, my) = (num(monitor, "x")?, num(monitor, "y")?);
 
-    cx.displays()
-        .into_iter()
-        .find(|d| {
-            let b = d.bounds();
-            (f32::from(b.origin.x) - mx).abs() < 1.0 && (f32::from(b.origin.y) - my).abs() < 1.0
-        })
-        .map(|d| d.id())
+    let displays = cx.displays();
+    displays.into_iter().find(|d| {
+        let b = d.bounds();
+        (f32::from(b.origin.x) - mx).abs() < 1.0 && (f32::from(b.origin.y) - my).abs() < 1.0
+    })
 }
 
 fn run_capture(program: &str, args: &[&str]) -> Option<String> {

@@ -79,7 +79,7 @@ arrayref = { path = "/g/gpui-ce/vendor/arrayref" } # crates.io arrayref is yanke
   `ExecStart=<dir>/target/release/upperadd daemon start --foreground`,
   `Restart=on-failure`, `WantedBy=default.target`, enabled at login.
 - CLI verbs over `$XDG_RUNTIME_DIR/upperadd.sock`:
-  `toggle` (default) | `show` | `stop` | `status` | `reindex`.
+  `toggle` | `show` | `stop` | `status` | `reindex` (bare `ua` prints help).
 - Hyprland: `bind = <key>, exec, ua toggle` + `layerrule blur, upperadd`
   documented in README (blur is compositor-side, not app-side).
 

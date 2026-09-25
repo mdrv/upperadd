@@ -1,7 +1,9 @@
+use std::time::{Duration, Instant};
+
 use gpui::{
-    div, hsla, layer_shell::*, point, prelude::*, px, size, App, AppContext, Bounds, Context,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions,
+    App, AppContext, Bounds, Context, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Pixels, Point, Render, Window, WindowBackgroundAppearance, WindowBounds, WindowKind,
+    WindowOptions, div, hsla, layer_shell::*, point, prelude::*, px, size,
 };
 use log::debug;
 
@@ -12,6 +14,11 @@ const HEIGHT: f32 = 560.0;
 /// First sticky's offset from the output's top-left; each next one cascades.
 const BASE_POS: f32 = 100.0;
 const CASCADE: f32 = 24.0;
+/// Cursor poll rate while dragging.
+const DRAG_POLL: Duration = Duration::from_millis(16);
+/// A fast fling exits the 36 px header at once; keep following the cursor
+/// while it is outside, but end the drag after this long without re-entry.
+const DRAG_LEAVE_GRACE: Duration = Duration::from_millis(250);
 
 /// A pinned note: read-only, always on top (`Layer::Top`), never takes the
 /// keyboard, draggable by its header, closable via ✕. M1.5 skeleton — the
@@ -19,21 +26,34 @@ const CASCADE: f32 = 24.0;
 pub struct Sticky {
     title: String,
     /// Surface offset from the output's top-left == (top, left) margins.
-    pos: gpui::Point<gpui::Pixels>,
+    pos: Point<Pixels>,
+    /// Position actually sent via `set_margin` (advanced in `render`).
+    sent: Point<Pixels>,
+    /// Layout origin of the output this surface lives on (cursorpos is
+    /// global, margins are output-local).
+    output_origin: Point<Pixels>,
     drag: Option<Drag>,
     cfg: Config,
 }
 
 struct Drag {
-    /// Pointer position (surface-local) at press.
-    press: gpui::Point<gpui::Pixels>,
+    /// `pos = global cursor + offset`, constant while dragging.
+    offset: Point<Pixels>,
+    /// When the cursor last left the surface, if it is currently outside.
+    left_at: Option<Instant>,
 }
 
-/// Open a sticky window. Unanchored layer surface: the margin IS the
-/// position (fork patch `Window::set_margin`, tag 0.0.260925.1). Explicit
-/// size wins here — §16.3's "0×0 bounds" rule is the inverse (all-anchors)
-/// case.
-pub fn spawn(cx: &mut App, cfg: &Config, title: String, index: usize) -> anyhow::Result<()> {
+/// Open a sticky window. Anchored top+left layer surface: margins position
+/// it within the output and `Window::set_margin` (fork patch, tag
+/// 0.0.260925.1) moves it at runtime. Explicit size wins here — §16.3's
+/// "0×0 bounds" rule is the inverse (all-anchors) case.
+pub fn spawn(
+    cx: &mut App,
+    cfg: &Config,
+    title: String,
+    index: usize,
+    output_origin: Point<Pixels>,
+) -> anyhow::Result<()> {
     let offset = (index % 8) as f32 * CASCADE;
     let pos = point(px(BASE_POS + offset), px(BASE_POS + offset));
     let options = WindowOptions {
@@ -49,10 +69,6 @@ pub fn spawn(cx: &mut App, cfg: &Config, title: String, index: usize) -> anyhow:
         kind: WindowKind::LayerShell(LayerShellOptions {
             namespace: "upperadd-sticky".into(),
             layer: Layer::Top,
-            // Anchored top+left (not empty): compositors center unanchored
-            // layer surfaces and may ignore/oddly-apply margins for them;
-            // anchored edges always honor margins — the standard way to
-            // make a draggable layer panel.
             anchor: Anchor::TOP | Anchor::LEFT,
             exclusive_zone: Some(px(-1.)),
             margin: Some((pos.y, px(0.), px(0.), pos.x)),
@@ -63,7 +79,7 @@ pub fn spawn(cx: &mut App, cfg: &Config, title: String, index: usize) -> anyhow:
     };
     let cfg = cfg.clone();
     cx.open_window(options, |_, cx| {
-        cx.new(|cx| Sticky::new(cfg, title, pos, cx))
+        cx.new(|cx| Sticky::new(cfg, title, pos, output_origin, cx))
     })?;
     Ok(())
 }
@@ -72,12 +88,15 @@ impl Sticky {
     fn new(
         cfg: Config,
         title: String,
-        pos: gpui::Point<gpui::Pixels>,
+        pos: Point<Pixels>,
+        output_origin: Point<Pixels>,
         _cx: &mut Context<Self>,
     ) -> Self {
         Self {
             title,
             pos,
+            sent: pos,
+            output_origin,
             drag: None,
             cfg,
         }
@@ -86,37 +105,75 @@ impl Sticky {
     fn on_header_down(
         &mut self,
         ev: &MouseDownEvent,
-        window: &mut Window,
-        _cx: &mut Context<Self>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
     ) {
         log::debug!("sticky drag start at {:?}", ev.position);
-        self.drag = Some(Drag { press: ev.position });
-        window.refresh();
+        // At press the surface origin == self.pos, so cursor_global =
+        // self.pos + ev.position; with pos = cursor_global + offset that
+        // makes offset = −press_local, constant for the whole drag.
+        let offset = point(-ev.position.x, -ev.position.y);
+        self.drag = Some(Drag {
+            offset,
+            left_at: None,
+        });
+        // Ground-truth drag loop: poll the global cursor (origin-independent,
+        // so no feedback wiggle) and keep following even when fast movement
+        // carries the cursor outside this surface.
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(DRAG_POLL).await;
+            if !this.update(cx, Sticky::drag_tick).unwrap_or(false) {
+                break;
+            }
+        })
+        .detach();
     }
 
-    fn on_move(&mut self, ev: &MouseMoveEvent, window: &mut Window, _cx: &mut Context<Self>) {
-        let Some(drag) = &self.drag else { return };
-        if ev.pressed_button != Some(MouseButton::Left) {
-            log::debug!("sticky drag cancelled (button up missed)");
+    fn on_move(&mut self, ev: &MouseMoveEvent, _window: &mut Window, _cx: &mut Context<Self>) {
+        if self.drag.is_some() && ev.pressed_button != Some(MouseButton::Left) {
+            debug!("sticky drag cancelled (button up missed)");
             self.drag = None;
-            return;
         }
-        // Event positions are SURFACE-LOCAL, and the surface moves under the
-        // cursor as we re-margin it: origin(k) == pos(k). So the correct
-        // update is pos(k+1) = pos(k) + (local(k+1) - local(press)) —
-        // NOT pos(start) + delta, which lags the cursor compounding.
-        self.pos = point(
-            self.pos.x + (ev.position.x - drag.press.x),
-            self.pos.y + (ev.position.y - drag.press.y),
-        );
-        log::debug!("sticky drag to {:?}", self.pos);
-        window.set_margin((self.pos.y, px(0.), px(0.), self.pos.x));
     }
 
-    fn on_up(&mut self, _ev: &MouseUpEvent, window: &mut Window, _cx: &mut Context<Self>) {
-        if self.drag.take().is_some() {
-            window.refresh();
+    fn on_up(&mut self, _ev: &MouseUpEvent, _window: &mut Window, _cx: &mut Context<Self>) {
+        self.drag = None;
+    }
+
+    /// One cursor poll while dragging. Returns false when the drag is over.
+    fn drag_tick(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(drag) = &mut self.drag else { return false };
+        let Some(cursor) = crate::daemon::hypr_cursor_global() else {
+            return true; // Hyprland IPC hiccup; keep the drag alive
+        };
+        let local = point(
+            cursor.x - self.output_origin.x,
+            cursor.y - self.output_origin.y,
+        );
+        // Pointer-leave detection from the same ground truth as the motion
+        // (surface events stop when the cursor exits): grace-period the end
+        // of the drag so fast flings that exit the header still follow.
+        let inside = local.x >= self.pos.x
+            && local.x < self.pos.x + px(WIDTH)
+            && local.y >= self.pos.y
+            && local.y < self.pos.y + px(HEIGHT);
+        if inside {
+            drag.left_at = None;
+        } else {
+            let left_at = *drag.left_at.get_or_insert(Instant::now());
+            if left_at.elapsed() > DRAG_LEAVE_GRACE {
+                debug!("sticky drag ended (cursor left the surface)");
+                self.drag = None;
+                return false;
+            }
         }
+        let target = point(local.x + drag.offset.x, local.y + drag.offset.y);
+        if target != self.pos {
+            debug!("sticky poll {:?} -> {:?}", self.pos, target);
+            self.pos = target;
+            cx.notify(); // render applies the margin (frame-gated)
+        }
+        true
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -156,7 +213,15 @@ impl Sticky {
 }
 
 impl Render for Sticky {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Frame-gated margin application: at most one set_margin per drawn
+        // frame, and only when the polled position actually moved.
+        if self.pos != self.sent {
+            let p = self.pos;
+            self.sent = p;
+            debug!("sticky set_margin {:?}", p);
+            window.set_margin((p.y, px(0.), px(0.), p.x));
+        }
         let alpha = self.cfg.window.panel_alpha;
         let radius = self.cfg.window.corner_radius;
         div()

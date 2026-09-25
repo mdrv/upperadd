@@ -22,7 +22,7 @@ enum Command {
         #[command(subcommand)]
         cmd: Daemon,
     },
-    /// Toggle overlay visibility (default verb)
+    /// Toggle overlay visibility
     Toggle,
     /// Show the overlay
     Show,
@@ -47,7 +47,12 @@ enum Daemon {
 }
 
 pub fn run() -> anyhow::Result<()> {
-    match Cli::parse().command.unwrap_or(Command::Toggle) {
+    let Some(command) = Cli::parse().command else {
+        use clap::CommandFactory as _;
+        let _ = Cli::command().print_help(); // bare `ua` behaves like `ua -h`
+        return Ok(());
+    };
+    match command {
         Command::Daemon {
             cmd: Daemon::Start { foreground },
         } => {

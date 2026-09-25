@@ -8,6 +8,8 @@ Restart=on-failure
 RestartPreventExitStatus=1
 RestartSec=2
 Environment=WAYLAND_DISPLAY=wayland-1
+# Editors are spawned detached (process_group 0); don't kill them on stop.
+KillMode=process
 
 [Install]
 WantedBy=default.target

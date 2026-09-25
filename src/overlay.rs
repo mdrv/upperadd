@@ -1,15 +1,16 @@
 use std::time::{Duration, Instant};
 
+use std::path::Path;
+
 use futures::channel::mpsc::UnboundedSender;
 use gpui::{
     div, hsla, layer_shell::KeyboardInteractivity, prelude::*, px, relative, uniform_list, white,
-    Context, FocusHandle, FontStyle, Global, HighlightStyle, InteractiveElement, KeyDownEvent,
-    Pixels, Point, Render, ScrollStrategy, StrikethroughStyle, StyledText, UnderlineStyle,
-    UniformListScrollHandle, Window, WindowHandle, FontWeight,
+    Context, FocusHandle, Global, InteractiveElement, KeyDownEvent, Pixels, Point, Render,
+    ScrollStrategy, UniformListScrollHandle, Window, WindowHandle,
 };
 
 use crate::config::Config;
-use crate::markdown::{self, Block, BlockKind, Inline};
+use crate::markdown;
 use crate::search::{Mode, SearchModel};
 use crate::worker::IndexCmd;
 
@@ -96,6 +97,48 @@ impl Overlay {
         });
     }
 
+    /// Enter: hand the selected note to the editor (spec 00 — default
+    /// `neovide +{line} {file}` via the arg template in config). The
+    /// overlay hides first and the editor is spawned inside the deferred
+    /// tick, *after* `apply_visibility` released the exclusive keyboard —
+    /// spawn before that and the editor comes up unfocused. `process_group`
+    /// detaches it from the daemon's process group so `ua stop` (or a
+    /// daemon crash) can't take the editor down.
+    fn open_editor(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(hit) = self.search.results.get(self.search.selected) else {
+            return;
+        };
+        let abs = self.cfg.notes.dir.join(&hit.path);
+        let line = (hit.line + 1).to_string();
+        let file = abs.display().to_string();
+        let args: Vec<String> = self
+            .cfg
+            .editor
+            .args
+            .iter()
+            .map(|t| t.replace("{line}", &line).replace("{file}", &file))
+            .collect();
+        let cmd = self.cfg.editor.command.clone();
+        self.visible = false;
+        cx.defer(move |app| {
+            let handle = app.global::<OverlayGlobal>().0;
+            let _ = handle.update(app, |ov, window, cx| ov.apply_visibility(window, cx));
+            use std::os::unix::process::CommandExt as _;
+            match std::process::Command::new(&cmd)
+                .args(&args)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .process_group(0)
+                .spawn()
+            {
+                Ok(_) => log::info!("editor launched: {cmd} {args:?}"),
+                Err(err) => log::warn!("launching editor {cmd}: {err:#}"),
+            }
+        });
+        cx.notify();
+    }
+
     /// Send the current query to the index worker; the reply is applied only
     /// if it answers the newest request (generation guard).
     fn request_results(&mut self, cx: &mut Context<Self>) {
@@ -149,11 +192,11 @@ impl Overlay {
                         cx.notify();
                         return;
                     }
-                    // Editor handoff lands in M4; swallow for now so typing
-                    // sessions don't accidentally trigger anything.
+                    // Enter: editor handoff (spec 00) from either mode.
                     "enter" => {
+                        self.open_editor(window, cx);
                         cx.stop_propagation();
-                        return;
+                        cx.notify();
                     }
                     // Pinning is a normal-mode verb.
                     "tab" => {
@@ -222,8 +265,14 @@ impl Overlay {
                     self.pin_selected(cx);
                     cx.stop_propagation();
                 }
-                "i" | "enter" => {
+                "i" => {
                     self.search.enter_insert();
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+                // Enter: editor handoff (spec 00).
+                "enter" => {
+                    self.open_editor(window, cx);
                     cx.stop_propagation();
                     cx.notify();
                 }
@@ -322,17 +371,45 @@ impl Overlay {
         false
     }
 
-    /// Extract the selected note into a sticky window (spec 01). The overlay
-    /// stays open with its state intact; sticky content lands with M3.
+    /// Extract the selected note into a sticky window (spec 01). The
+    /// overlay stays open with its state intact; the section content is
+    /// fetched fresh so the sticky shows the note even if the preview pane
+    /// hasn't loaded it yet.
     fn pin_selected(&mut self, cx: &mut Context<Self>) {
         let Some(hit) = self.search.results.get(self.search.selected) else {
             return;
         };
         self.pins += 1;
+        let index = self.pins;
         let title = hit.title.clone();
-        if let Err(err) = crate::sticky::spawn(cx, &self.cfg, title, self.pins, self.origin) {
-            log::warn!("spawning sticky: {err:#}");
+        let key = (hit.path.clone(), hit.line);
+        let cfg = self.cfg.clone();
+        let origin = self.origin;
+        let index_tx = self.index_tx.clone();
+        let (tx, rx) = futures::channel::oneshot::channel();
+        if self
+            .index_tx
+            .unbounded_send(IndexCmd::Section {
+                path: key.0.clone(),
+                line: key.1,
+                resp: tx,
+            })
+            .is_err()
+        {
+            return;
         }
+        cx.spawn(async move |_, cx| {
+            let Ok(Some(content)) = rx.await else {
+                log::warn!("pin: section vanished before fetch ({})", key.0);
+                return;
+            };
+            if let Err(err) = cx.update(|app| {
+                crate::sticky::spawn(app, &cfg, title, index, origin, key, content, index_tx)
+            }) {
+                log::warn!("spawning sticky: {err:#}");
+            }
+        })
+        .detach();
     }
 
     // ----- rendering -----------------------------------------------------
@@ -452,7 +529,7 @@ impl Overlay {
                             msg.to_string()
                         }
                         _ => format!(
-                            "{} result{} · Esc⇥normal · j/k move · P pin · ⇧R reindex",
+                            "{} result{} · Esc⇥normal · j/k move · P pin · ⇧R reindex · ⏎ edit",
                             self.search.len(),
                             if self.search.len() == 1 { "" } else { "s" }
                         ),
@@ -489,8 +566,20 @@ impl Overlay {
             .child(self.render_status())
     }
 
+    /// The note's directory — relative image URLs resolve against it
+    /// (AGENTS.md fork rule 5).
+    fn note_dir(&self, path: &str) -> std::path::PathBuf {
+        self.cfg
+            .notes
+            .dir
+            .join(path)
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.cfg.notes.dir.clone())
+    }
+
     fn render_preview(&self) -> gpui::AnyElement {
-        let Some((_, content)) = &self.preview else {
+        let Some(((path, _), content)) = &self.preview else {
             return div()
                 .flex_1()
                 .h_full()
@@ -505,6 +594,7 @@ impl Overlay {
                 )
                 .into_any_element();
         };
+        let base = self.note_dir(path);
         let blocks = markdown::parse(content);
         div()
             .id("preview")
@@ -512,126 +602,11 @@ impl Overlay {
             .h_full()
             .flex()
             .flex_col()
-            .gap_2p5()
             .px(px(20.0))
             .py(px(16.0))
             .overflow_y_scroll()
-            .children(blocks.iter().map(|b| self.render_block(b)))
+            .child(markdown::render_blocks(&blocks, &base))
             .into_any_element()
-    }
-
-    fn render_block(&self, block: &Block) -> gpui::AnyElement {
-        match block {
-            Block::Rule => div()
-                .h(px(1.0))
-                .w_full()
-                .bg(hsla(0.0, 0.0, 1.0, 0.12))
-                .into_any_element(),
-            Block::Code { code } => div()
-                .font_family(".monospace")
-                .text_size(px(11.5))
-                .text_color(hsla(0.0, 0.0, 0.85, 0.9))
-                .bg(hsla(0.0, 0.0, 1.0, 0.05))
-                .rounded(px(6.0))
-                .px(px(10.0))
-                .py(px(8.0))
-                .child(code.clone())
-                .into_any_element(),
-            Block::Styled { kind, text, spans } => {
-                let line = div().child(self.styled_line(text, spans));
-                let block = match kind {
-                    BlockKind::Heading(level) => {
-                        let size = match level {
-                            1 => 20.0,
-                            2 => 17.0,
-                            3 => 15.0,
-                            _ => 13.5,
-                        };
-                        line.text_size(px(size)).font_weight(FontWeight::BOLD)
-                    }
-                    BlockKind::Paragraph => {
-                        line.text_size(px(13.0)).line_height(relative(1.5))
-                    }
-                    BlockKind::Quote => line
-                        .text_size(px(13.0))
-                        .line_height(relative(1.5))
-                        .border_l_2()
-                        .border_color(hsla(220.0, 0.5, 0.55, 0.8))
-                        .pl(px(10.0))
-                        .text_color(hsla(0.0, 0.0, 0.85, 0.7)),
-                    BlockKind::Item => line.text_size(px(13.0)),
-                };
-                if *kind == BlockKind::Item {
-                    div()
-                        .flex()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_size(px(13.0))
-                                .text_color(hsla(220.0, 0.5, 0.65, 0.9))
-                                .child("•"),
-                        )
-                        .child(block)
-                        .into_any_element()
-                } else {
-                    block.into_any_element()
-                }
-            }
-        }
-    }
-
-    /// One block's text with inline highlight spans applied.
-    fn styled_line(&self, text: &str, spans: &[(std::ops::Range<usize>, Inline)]) -> StyledText {
-        if spans.is_empty() {
-            return StyledText::new(text.to_string());
-        }
-        StyledText::new(text.to_string()).with_highlights(
-            spans
-                .iter()
-                .map(|(range, inline)| (range.clone(), self.highlight(*inline))),
-        )
-    }
-
-    fn highlight(&self, inline: Inline) -> HighlightStyle {
-        let none = HighlightStyle {
-            color: None,
-            font_weight: None,
-            font_style: None,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-            fade_out: None,
-        };
-        match inline {
-            Inline::Bold => HighlightStyle {
-                font_weight: Some(FontWeight::BOLD),
-                ..none
-            },
-            Inline::Italic => HighlightStyle {
-                font_style: Some(FontStyle::Italic),
-                ..none
-            },
-            Inline::Code => HighlightStyle {
-                background_color: Some(hsla(0.0, 0.0, 1.0, 0.10)),
-                ..none
-            },
-            Inline::Strike => HighlightStyle {
-                strikethrough: Some(StrikethroughStyle {
-                    thickness: px(1.0),
-                    color: None,
-                }),
-                ..none
-            },
-            Inline::Link => HighlightStyle {
-                color: Some(hsla(215.0, 0.6, 0.7, 1.0)),
-                underline: Some(UnderlineStyle {
-                    thickness: px(1.0),
-                    color: None,
-                    wavy: false,
-                }),
-                ..none
-            },
-        }
     }
 }
 

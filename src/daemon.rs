@@ -103,13 +103,22 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
                         pins += 1;
                         let index = pins;
                         let origin = output_origin;
+                        let cfg = cfg.clone();
+                        let index_tx = ui_index_tx.clone();
                         cx.update(|app| {
+                            let body = format!(
+                                "# Pinned test #{index}\n\nStandalone pin-test sticky — pin \
+                                 real notes from the overlay with **P**.\n"
+                            );
                             if let Err(err) = crate::sticky::spawn(
                                 app,
                                 &cfg,
                                 format!("Pinned test #{index}"),
                                 index,
                                 origin,
+                                ("pin-test".into(), 0),
+                                body,
+                                index_tx,
                             ) {
                                 warn!("spawning sticky: {err:#}");
                             }

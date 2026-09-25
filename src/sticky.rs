@@ -1,13 +1,18 @@
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use futures::channel::mpsc::UnboundedSender;
 use gpui::{
-    App, AppContext, Bounds, Context, CursorStyle, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Point, Render, Size, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowKind, WindowOptions, div, hsla, layer_shell::*, point, prelude::*, px, size,
+    App, AppContext, Bounds, ClickEvent, Context, CursorStyle, InteractiveElement, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Size, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, hsla,
+    layer_shell::*, point, prelude::*, px, size,
 };
 use log::debug;
 
 use crate::config::Config;
+use crate::markdown;
+use crate::worker::IndexCmd;
 
 const DEFAULT_W: f32 = 420.0;
 const DEFAULT_H: f32 = 560.0;
@@ -165,9 +170,8 @@ impl Gesture {
 
 /// A pinned note: read-only, always on top (`Layer::Top`), never takes the
 /// keyboard, draggable by its header, resizable by its edges and corners,
-/// closable via ✕.
-/// M1.5 skeleton — the body is a placeholder until the M3 markdown pipeline
-/// lands (spec 01).
+/// closable via ✕. The body renders the bound section's markdown (same
+/// pipeline as the preview pane); ↻ re-reads it via the index worker.
 pub struct Sticky {
     title: String,
     /// Surface offset from the output's top-left == (top, left) margins.
@@ -181,6 +185,12 @@ pub struct Sticky {
     /// global, margins are output-local).
     output_origin: Point<Pixels>,
     gesture: Option<Gesture>,
+    /// Bound section (vault-relative path, section line) — what ↻ re-reads
+    /// and what relative image URLs resolve against.
+    key: (String, u32),
+    /// Markdown source of the bound section.
+    body: String,
+    index_tx: UnboundedSender<IndexCmd>,
     cfg: Config,
 }
 
@@ -194,6 +204,9 @@ pub fn spawn(
     title: String,
     index: usize,
     output_origin: Point<Pixels>,
+    key: (String, u32),
+    body: String,
+    index_tx: UnboundedSender<IndexCmd>,
 ) -> anyhow::Result<()> {
     let offset = (index % 8) as f32 * CASCADE;
     let pos = point(px(BASE_POS + offset), px(BASE_POS + offset));
@@ -221,18 +234,22 @@ pub fn spawn(
     };
     let cfg = cfg.clone();
     cx.open_window(options, |_, cx| {
-        cx.new(|cx| Sticky::new(cfg, title, pos, win_size, output_origin, cx))
+        cx.new(|cx| Sticky::new(cfg, title, pos, win_size, output_origin, key, body, index_tx, cx))
     })?;
     Ok(())
 }
 
 impl Sticky {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         cfg: Config,
         title: String,
         pos: Point<Pixels>,
         size: Size<Pixels>,
         output_origin: Point<Pixels>,
+        key: (String, u32),
+        body: String,
+        index_tx: UnboundedSender<IndexCmd>,
         _cx: &mut Context<Self>,
     ) -> Self {
         Self {
@@ -243,8 +260,55 @@ impl Sticky {
             sent_size: size,
             output_origin,
             gesture: None,
+            key,
+            body,
+            index_tx,
             cfg,
         }
+    }
+
+    /// ↻: re-read the bound section via the index worker (fs-watch already
+    /// keeps the DB fresh; this pulls the latest into this sticky).
+    fn on_sync(
+        &mut self,
+        _: &ClickEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (tx, rx) = futures::channel::oneshot::channel();
+        if self
+            .index_tx
+            .unbounded_send(IndexCmd::Section {
+                path: self.key.0.clone(),
+                line: self.key.1,
+                resp: tx,
+            })
+            .is_err()
+        {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            if let Ok(Some(content)) = rx.await {
+                this.update(cx, |s, cx| {
+                    s.body = content;
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// The note's directory — relative image URLs in the body resolve
+    /// against it (same rule as the preview pane).
+    fn note_dir(&self) -> PathBuf {
+        self.cfg
+            .notes
+            .dir
+            .join(&self.key.0)
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.cfg.notes.dir.clone())
     }
 
     /// Begin a pointer gesture and start the ground-truth poll loop.
@@ -426,9 +490,7 @@ impl Sticky {
                     .id("sync")
                     .px(px(6.0))
                     .cursor_pointer()
-                    .on_click(cx.listener(|_, _, _, _| {
-                        debug!("sticky sync: no file bound yet (M3 wiring)");
-                    }))
+                    .on_click(cx.listener(Self::on_sync))
                     .child("↻"),
             )
             .child(
@@ -460,7 +522,7 @@ impl Sticky {
                     .flex_1()
                     .text_size(px(11.0))
                     .text_color(hsla(0.0, 0.0, 1.0, 0.45))
-                    .child("no note bound yet"),
+                    .child(format!("{}:{}", self.key.0, self.key.1 + 1)),
             )
     }
 
@@ -550,12 +612,19 @@ impl Render for Sticky {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_up))
             .child(self.render_header(cx))
             .child(
+                // Markdown body (same pipeline as the preview pane), wheel-
+                // scrollable; overflow_y_scroll needs a stateful element.
                 div()
+                    .id("sticky-body")
                     .flex_1()
-                    .p(px(12.0))
-                    .text_size(px(13.0))
-                    .text_color(hsla(0.0, 0.0, 1.0, 0.6))
-                    .child("M1.5 skeleton — markdown body lands with the M3 preview pipeline."),
+                    .w_full()
+                    .overflow_y_scroll()
+                    .px(px(14.0))
+                    .py(px(12.0))
+                    .child(markdown::render_blocks(
+                        &markdown::parse(&self.body),
+                        &self.note_dir(),
+                    )),
             )
             .child(self.render_footer(cx))
             .child(self.render_edge(Edge::Left, cx))

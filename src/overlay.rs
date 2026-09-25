@@ -253,8 +253,9 @@ impl Overlay {
                     cx.stop_propagation();
                 }
                 // Alt+J/K: reorder pinned sections (before the plain j/k arms).
+                // Vim semantics: j moves the pin down, k moves it up.
                 "j" | "k" if ks.modifiers.alt => {
-                    self.move_pin_selected(ks.key == "j", cx);
+                    self.move_pin_selected(ks.key == "k", cx);
                     cx.stop_propagation();
                 }
                 "j" | "down" => {
@@ -405,16 +406,35 @@ impl Overlay {
         self.request_results(cx);
     }
 
-    /// Move the selected pin one slot up/down within the pinned group.
+    /// Move the selected pin one slot up/down within the pinned group and
+    /// keep the selection on the moved note.
     fn move_pin_selected(&mut self, up: bool, cx: &mut Context<Self>) {
         let Some(hit) = self.search.results.get(self.search.selected) else {
             return;
         };
-        let _ = self.index_tx.unbounded_send(IndexCmd::MovePin {
-            path: hit.path.clone(),
-            line: hit.line,
-            up,
-        });
+        let path = hit.path.clone();
+        let line = hit.line;
+        let pinned = hit.pinned;
+        let _ = self
+            .index_tx
+            .unbounded_send(IndexCmd::MovePin { path, line, up });
+        // The selection follows the note: pins are a prefix of the results
+        // in pin order, so the moved note lands on the adjacent row — but
+        // only when that neighbor is itself pinned (boundary = no-op, same
+        // clamp the worker applies).
+        if pinned {
+            let len = self.search.results.len();
+            let neighbor = if up {
+                self.search.selected.checked_sub(1)
+            } else {
+                Some(self.search.selected + 1)
+            };
+            if let Some(ix) = neighbor {
+                if ix < len && self.search.results[ix].pinned {
+                    self.search.selected = ix;
+                }
+            }
+        }
         self.request_results(cx);
     }
 

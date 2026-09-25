@@ -1,8 +1,11 @@
 mod cli;
 mod config;
 mod daemon;
+mod db;
+mod index;
 mod overlay;
 mod sticky;
+mod worker;
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))

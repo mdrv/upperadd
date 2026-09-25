@@ -15,10 +15,12 @@ gpui_platform = { package = "mdrv-gpui-platform", git = "https://github.com/mdrv
 mdrv-db = { version = "0.5.1", features = ["turso"] } # engine crate; TursoPort via the 0.5.1 export
 
 anyhow = "1"
+blake3 = "1" # restart-stable section content hashes (std hasher is per-process seeded)
 clap = { version = "4", features = ["derive"] }
 env_logger = "0.11"
 futures = "0.3"
 log = "0.4"
+notify = "8" # spec-mandated fs-watch: incremental index updates on note saves
 serde = { version = "1", features = ["derive"] }
 serde_json = "1" # parse `hyprctl monitors -j` for cursor-output resolution
 toml = "0.9"

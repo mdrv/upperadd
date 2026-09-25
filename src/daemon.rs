@@ -3,6 +3,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::rc::Rc;
 
 use futures::channel::mpsc::{UnboundedSender, unbounded};
+use futures::channel::oneshot;
 use futures::StreamExt;
 use gpui::{
     App, AppContext, AsyncApp, Bounds, DisplayId, KeyBinding, Pixels, Point, PlatformDisplay,
@@ -15,6 +16,7 @@ use log::warn;
 use crate::cli::socket_path;
 use crate::config::{Config, NamedOutput, OutputSpec};
 use crate::overlay::{Hide, Overlay, OverlayGlobal};
+use crate::worker::{self, IndexCmd};
 
 /// Verbs the socket thread forwards into the gpui UI task.
 enum Ipc {
@@ -40,11 +42,12 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
     log::info!("listening on {}", sock.display());
 
     let (tx, mut rx) = unbounded::<Ipc>();
+    let index_tx = worker::spawn(cfg.notes.dir.clone(), cfg.sections.separator);
 
     application().run(move |cx: &mut App| {
         cx.bind_keys(vec![KeyBinding::new("escape", Hide, None)]);
 
-        std::thread::spawn(move || accept_loop(listener, tx));
+        std::thread::spawn(move || accept_loop(listener, tx, index_tx));
 
         // §16.9: ONE persistent window, created hidden (show: false), never
         // destroyed; Layer::Top per AGENTS.md fork rules.
@@ -137,7 +140,11 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn accept_loop(listener: UnixListener, tx: UnboundedSender<Ipc>) {
+fn accept_loop(
+    listener: UnixListener,
+    tx: UnboundedSender<Ipc>,
+    index_tx: UnboundedSender<IndexCmd>,
+) {
     for stream in listener.incoming() {
         let mut stream = match stream {
             Ok(stream) => stream,
@@ -151,8 +158,11 @@ fn accept_loop(listener: UnixListener, tx: UnboundedSender<Ipc>) {
             "toggle" => forward(&tx, Ipc::Toggle),
             "show" => forward(&tx, Ipc::Show),
             "stop" => forward(&tx, Ipc::Stop),
-            "status" => Ok("running".into()),
-            "reindex" => Ok("no index yet (M2)".into()),
+            "status" => ask_index(&index_tx, |resp| IndexCmd::Stats { resp }),
+            "reindex" => index_tx
+                .unbounded_send(IndexCmd::Reindex)
+                .map(|_| "reindex started".to_string())
+                .map_err(|_| "index worker gone".to_string()),
             "pin-test" => forward(&tx, Ipc::PinTest),
             other => Err(format!("unknown verb {other:?}")),
         };
@@ -162,6 +172,18 @@ fn accept_loop(listener: UnixListener, tx: UnboundedSender<Ipc>) {
         };
         let _ = stream.write_all(out.as_bytes());
     }
+}
+
+/// Send a command to the index worker and wait for its reply.
+fn ask_index(
+    index_tx: &UnboundedSender<IndexCmd>,
+    cmd: impl FnOnce(oneshot::Sender<String>) -> IndexCmd,
+) -> Result<String, String> {
+    let (resp_tx, resp_rx) = oneshot::channel();
+    index_tx
+        .unbounded_send(cmd(resp_tx))
+        .map_err(|_| "index worker gone".to_string())?;
+    futures::executor::block_on(resp_rx).map_err(|_| "index worker dropped the request".into())
 }
 
 fn forward(tx: &UnboundedSender<Ipc>, msg: Ipc) -> Result<String, String> {

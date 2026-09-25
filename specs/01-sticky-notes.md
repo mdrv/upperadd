@@ -90,3 +90,25 @@ be pinned at once. A sticky never takes the keyboard
   stays spawned (`AsyncApp::update` re-entry deadlocks mid-update — tag .3
   did it fully synchronously and froze the UI thread). Documented in
   `/g/gpui-ce/MDRV.md` and `/x/m/v270/gpui-ce/gpui-ce.md` §6.
+
+## Update 2026-09-25 — text selection (lands with M3)
+
+gpui has no selectable-text element; the fork has the primitives (wrapped
+layouts expose `index_for_position`/`position_for_index`; `StyledText`
+highlights paint the selection) and full clipboard + Wayland primary
+selection (`write_to_clipboard`/`write_to_primary`). No fork patch needed.
+
+- **Shared primitive**: one selectable-text helper used by both the sticky
+  body and the overlay preview — mouse-down anchors a glyph index, drag
+  recomputes the end via `index_for_position`, render paints the highlight.
+- **Stickies are mouse-only** (keyboard is None forever): releasing the
+  selection auto-copies to **primary selection AND clipboard** (terminal
+  style). A ⧉ button in the footer copies the selection if any, else the
+  whole note.
+- **Overlay preview** additionally gets **Ctrl+C** (copy selection; the
+  overlay takes the keyboard when shown).
+- **Copy confirmation**: a transient "Copied" chip appears (over the sticky
+  / preview pane) for ~1.5 s after a successful copy. Timed show/hide only —
+  no opacity fade (§28 animation freeze).
+- **Timing**: with the M3 markdown body, not before — the primitive needs
+  the real text layout; drag-selecting the placeholder is pointless.

@@ -1,9 +1,13 @@
+use futures::channel::mpsc::UnboundedSender;
 use gpui::{
-    actions, div, hsla, layer_shell::KeyboardInteractivity, prelude::*, px, white, Context,
-    FocusHandle, Global, Render, Window, WindowHandle,
+    actions, div, hsla, layer_shell::KeyboardInteractivity, prelude::*, px, relative, uniform_list,
+    white, Context, FocusHandle, Global, KeyDownEvent, Pixels, Point, Render,
+    ScrollStrategy, UniformListScrollHandle, Window, WindowHandle,
 };
 
 use crate::config::Config;
+use crate::search::{Mode, SearchModel};
+use crate::worker::IndexCmd;
 
 actions!(upperadd, [Hide]);
 
@@ -19,14 +23,30 @@ pub struct Overlay {
     pub visible: bool,
     focus: FocusHandle,
     cfg: Config,
+    search: SearchModel,
+    list_scroll: UniformListScrollHandle,
+    index_tx: UnboundedSender<IndexCmd>,
+    /// Output origin (global layout coords) handed to pinned stickies.
+    origin: Point<Pixels>,
+    pins: usize,
 }
 
 impl Overlay {
-    pub fn new(cfg: Config, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        cfg: Config,
+        index_tx: UnboundedSender<IndexCmd>,
+        origin: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         Self {
             visible: false,
             focus: cx.focus_handle(),
             cfg,
+            search: SearchModel::new(),
+            list_scroll: UniformListScrollHandle::new(),
+            index_tx,
+            origin,
+            pins: 0,
         }
     }
 
@@ -42,6 +62,8 @@ impl Overlay {
         });
         if self.visible {
             window.focus(&self.focus, cx);
+            // Fresh results for the current query (also the very first show).
+            self.request_results(cx);
         }
         cx.notify();
     }
@@ -58,15 +80,324 @@ impl Overlay {
             let _ = handle.update(app, |ov, window, cx| ov.apply_visibility(window, cx));
         });
     }
+
+    /// Send the current query to the index worker; the reply is applied only
+    /// if it answers the newest request (generation guard).
+    fn request_results(&mut self, cx: &mut Context<Self>) {
+        let generation = self.search.bump_generation();
+        let query = self.search.query.clone();
+        let (tx, rx) = futures::channel::oneshot::channel();
+        if self
+            .index_tx
+            .unbounded_send(IndexCmd::Search { query, resp: tx })
+            .is_err()
+        {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            if let Ok(results) = rx.await {
+                this.update(cx, |ov, cx| {
+                    if ov.search.apply_results(results, generation) {
+                        cx.notify();
+                    }
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    fn on_key(&mut self, ev: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        let ks = &ev.keystroke;
+        let mods = ks.modifiers;
+        let plain = !mods.control && !mods.alt && !mods.platform;
+        let printable = || -> Option<char> {
+            if !plain {
+                return None;
+            }
+            ks.key_char
+                .as_ref()
+                .and_then(|s| s.chars().next())
+                .filter(|c| !c.is_control())
+        };
+
+        match self.search.mode {
+            Mode::Insert => {
+                let mut query_changed = false;
+                match ks.key.as_str() {
+                    // Two-stage Esc (spec 01): insert → normal. Consumed here
+                    // so the global escape→Hide action does not fire.
+                    "escape" => {
+                        self.search.enter_normal();
+                        cx.stop_propagation();
+                        cx.notify();
+                        return;
+                    }
+                    // Editor handoff lands in M4; swallow for now so typing
+                    // sessions don't accidentally trigger anything.
+                    "enter" => {
+                        cx.stop_propagation();
+                        return;
+                    }
+                    // Pinning is a normal-mode verb.
+                    "tab" => {
+                        cx.stop_propagation();
+                        return;
+                    }
+                    "up" => {
+                        if self.move_selection(-1) {
+                            cx.notify();
+                        }
+                        cx.stop_propagation();
+                        return;
+                    }
+                    "down" => {
+                        if self.move_selection(1) {
+                            cx.notify();
+                        }
+                        cx.stop_propagation();
+                        return;
+                    }
+                    "backspace" if plain => query_changed = self.search.backspace(),
+                    "delete" if plain => query_changed = self.search.delete(),
+                    "left" if plain => _ = self.search.left(),
+                    "right" if plain => _ = self.search.right(),
+                    "home" if plain => _ = self.search.home(),
+                    "end" if plain => _ = self.search.end(),
+                    _ => {
+                        if let Some(ch) = printable() {
+                            query_changed = self.search.insert(ch);
+                        } else {
+                            return;
+                        }
+                    }
+                }
+                if query_changed {
+                    self.request_results(cx);
+                }
+                cx.stop_propagation();
+                cx.notify();
+            }
+            Mode::Normal => match ks.key.as_str() {
+                // Second Esc stage: don't consume → the bound Hide action fires.
+                "escape" => {}
+                "j" | "down" => {
+                    if self.move_selection(1) {
+                        cx.notify();
+                    }
+                    cx.stop_propagation();
+                }
+                "k" | "up" => {
+                    if self.move_selection(-1) {
+                        cx.notify();
+                    }
+                    cx.stop_propagation();
+                }
+                // P/Tab pin the selected note (spec 01).
+                "p" | "tab" => {
+                    self.pin_selected(cx);
+                    cx.stop_propagation();
+                }
+                "i" | "enter" => {
+                    self.search.enter_insert();
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+                _ => {
+                    if let Some(ch) = printable() {
+                        // Any other printable drops you back into insert and
+                        // types the char (fzf feel: just type to filter).
+                        self.search.enter_insert();
+                        if self.search.insert(ch) {
+                            self.request_results(cx);
+                        }
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                }
+            },
+        }
+    }
+
+    /// Move the selection and keep it in view.
+    fn move_selection(&mut self, delta: i64) -> bool {
+        if self.search.move_selection(delta) {
+            self.list_scroll
+                .scroll_to_item(self.search.selected, ScrollStrategy::Nearest);
+            return true;
+        }
+        false
+    }
+
+    /// Extract the selected note into a sticky window (spec 01). The overlay
+    /// stays open with its state intact; sticky content lands with M3.
+    fn pin_selected(&mut self, cx: &mut Context<Self>) {
+        let Some(hit) = self.search.results.get(self.search.selected) else {
+            return;
+        };
+        self.pins += 1;
+        let title = hit.title.clone();
+        if let Err(err) = crate::sticky::spawn(cx, &self.cfg, title, self.pins, self.origin) {
+            log::warn!("spawning sticky: {err:#}");
+        }
+    }
+
+    // ----- rendering -----------------------------------------------------
+
+    fn render_query_line(&self) -> gpui::Div {
+        let chars: Vec<char> = self.search.query.chars().collect();
+        let at = self.search.cursor.min(chars.len());
+        let before: String = chars[..at].iter().collect();
+        let caret = chars.get(at).copied();
+        let after: String = chars[(at + usize::from(caret.is_some())).min(chars.len())..]
+            .iter()
+            .collect();
+        let insert = self.search.mode == Mode::Insert;
+
+        div()
+            .h(px(44.0))
+            .w_full()
+            .px(px(14.0))
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .border_b_1()
+            .border_color(hsla(0.0, 0.0, 1.0, 0.08))
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(hsla(220.0, 0.5, 0.65, 0.9))
+                    .child("❯"),
+            )
+            .child(div().text_size(px(13.5)).child(before))
+            .child(
+                // Block caret on the char under the cursor; dim when normal.
+                div()
+                    .text_size(px(13.5))
+                    .text_color(hsla(220.0, 0.2, 0.10, 1.0))
+                    .when(insert, |d| d.bg(hsla(0.0, 0.0, 0.92, 0.9)))
+                    .when(!insert, |d| d.text_color(hsla(0.0, 0.0, 1.0, 0.35)))
+                    .child(caret.map(String::from).unwrap_or_else(|| " ".into())),
+            )
+            .child(div().text_size(px(13.5)).child(after))
+    }
+
+    fn render_result_row(&self, ix: usize) -> gpui::AnyElement {
+        let hit = &self.search.results[ix];
+        let selected = ix == self.search.selected;
+        let subtitle = format!("{}:{}", hit.path, hit.line + 1);
+        div()
+            .id(ix)
+            .h(px(46.0))
+            .w_full()
+            .px(px(14.0))
+            .flex()
+            .flex_col()
+            .justify_center()
+            .when(selected, |d| d.bg(hsla(220.0, 0.30, 0.32, 0.55)))
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(hsla(0.0, 0.0, 0.92, 0.95))
+                    .truncate()
+                    .child(hit.title.clone()),
+            )
+            .child(
+                div()
+                    .text_size(px(10.5))
+                    .text_color(hsla(0.0, 0.0, 0.75, 0.55))
+                    .truncate()
+                    .child(subtitle),
+            )
+            .into_any_element()
+    }
+
+    fn render_results(&self, cx: &mut Context<Self>) -> gpui::Div {
+        if self.search.len() == 0 {
+            return div()
+                .flex_1()
+                .w_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(hsla(0.0, 0.0, 0.75, 0.4))
+                        .child("no matches"),
+                );
+        }
+        let len = self.search.len();
+        div().flex_1().w_full().overflow_hidden().child(
+            uniform_list("results", len, cx.processor(|this, range: std::ops::Range<usize>, _window, _cx| {
+                range.map(|ix| this.render_result_row(ix)).collect()
+            }))
+            .track_scroll(&self.list_scroll)
+            .h_full()
+            .w_full(),
+        )
+    }
+
+    fn render_status(&self) -> gpui::Div {
+        let insert = self.search.mode == Mode::Insert;
+        div()
+            .h(px(28.0))
+            .w_full()
+            .px(px(14.0))
+            .flex()
+            .items_center()
+            .justify_between()
+            .border_t_1()
+            .border_color(hsla(0.0, 0.0, 1.0, 0.08))
+            .child(
+                div()
+                    .text_size(px(10.5))
+                    .text_color(hsla(0.0, 0.0, 0.75, 0.5))
+                    .child(format!(
+                        "{} result{} · Esc⇥normal · j/k move · P pin",
+                        self.search.len(),
+                        if self.search.len() == 1 { "" } else { "s" }
+                    )),
+            )
+            .child(
+                div()
+                    .px(px(6.0))
+                    .py(px(2.0))
+                    .rounded(px(4.0))
+                    .text_size(px(10.0))
+                    .when(insert, |d| {
+                        d.bg(hsla(220.0, 0.5, 0.45, 0.8))
+                            .text_color(hsla(220.0, 0.2, 0.10, 1.0))
+                    })
+                    .when(!insert, |d| {
+                        d.bg(hsla(0.0, 0.0, 1.0, 0.12))
+                            .text_color(hsla(0.0, 0.0, 0.9, 0.8))
+                    })
+                    .child(if insert { "INSERT" } else { "NORMAL" }),
+            )
+    }
+
+    fn render_left_panel(&self, cx: &mut Context<Self>) -> gpui::Div {
+        div()
+            .w(relative(0.25))
+            .h_full()
+            .flex()
+            .flex_col()
+            .border_r_1()
+            .border_color(hsla(0.0, 0.0, 1.0, 0.08))
+            .child(self.render_query_line())
+            .child(self.render_results(cx))
+            .child(self.render_status())
+    }
 }
 
 impl Render for Overlay {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.visible {
             return div().size_full();
         }
         let cfg = &self.cfg.window;
-        let out = _window.bounds().size;
+        let out = window.bounds().size;
         let panel_w = px(f32::from(out.width) * cfg.width_fraction);
         let panel_h = px(f32::from(out.height) * cfg.height_fraction);
         let margin = px(cfg.margin);
@@ -82,6 +413,7 @@ impl Render for Overlay {
             .items_start()
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::on_hide))
+            .on_key_down(cx.listener(Self::on_key))
             .child(
                 div()
                     .w(panel_w)
@@ -89,16 +421,29 @@ impl Render for Overlay {
                     .ml(margin)
                     .mb(margin)
                     .flex()
-                    .flex_col()
-                    .gap_2()
-                    .p_4()
+                    .flex_row()
+                    .overflow_hidden()
                     .bg(hsla(220.0, 0.2, 0.12, cfg.panel_alpha))
                     .rounded(px(cfg.corner_radius))
                     .border_1()
                     .border_color(hsla(0.0, 0.0, 1.0, 0.15))
                     .text_color(white())
-                    .child("upperadd — M1 shell (no data yet)")
-                    .child("Esc hide · ua toggle show/hide"),
+                    // fzf layout (spec 00): left search+results, right preview.
+                    .child(self.render_left_panel(cx))
+                    .child(
+                        div()
+                            .flex_1()
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(hsla(0.0, 0.0, 0.75, 0.3))
+                                    .child("preview lands with M3"),
+                            ),
+                    ),
             )
     }
 }

@@ -4,6 +4,7 @@ mod daemon;
 mod db;
 mod index;
 mod overlay;
+mod search;
 mod sticky;
 mod worker;
 

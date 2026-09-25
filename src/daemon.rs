@@ -43,6 +43,7 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
 
     let (tx, mut rx) = unbounded::<Ipc>();
     let index_tx = worker::spawn(cfg.notes.dir.clone(), cfg.sections.separator);
+    let ui_index_tx = index_tx.clone();
 
     application().run(move |cx: &mut App| {
         cx.bind_keys(vec![KeyBinding::new("escape", Hide, None)]);
@@ -78,8 +79,9 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
             }),
             ..Default::default()
         };
-        let handle = match cx.open_window(options, |_, cx| cx.new(|cx| Overlay::new(overlay_cfg, cx)))
-        {
+        let handle = match cx.open_window(options, |_, cx| {
+            cx.new(|cx| Overlay::new(overlay_cfg, ui_index_tx.clone(), output_origin, cx))
+        }) {
             Ok(handle) => handle,
             Err(err) => {
                 log::error!("opening overlay window: {err:#}");

@@ -320,6 +320,7 @@ fn render_block(block: &Block, base: &Path, fonts: &Fonts) -> AnyElement {
             };
             let line = div()
                 .font_family(family)
+                .text_color(TEXT)
                 .child(styled_line(text, spans, fonts));
             let block = match kind {
                 BlockKind::Heading(level) => {
@@ -399,6 +400,11 @@ fn note(text: &str) -> AnyElement {
 /// One block's text with inline highlight spans applied; inline code spans
 /// get the configured monospace family via font-family overrides (the
 /// surrounding div keeps the body/heading family).
+/// Base note text color. Markdown output is rendered onto dark translucent
+/// panels in both panes, so it carries its own readable color instead of
+/// inheriting (gpui's default is near-black — the black sticky-body bug).
+pub const TEXT: Hsla = hsla(220.0, 0.15, 0.90, 0.95);
+
 fn styled_line(text: &str, spans: &[(Range<usize>, Inline)], fonts: &Fonts) -> StyledText {
     let line = StyledText::new(text.to_string());
     if spans.is_empty() {

@@ -36,6 +36,16 @@ setters — apply then `surface.commit()`).
   (§16.3's "pass 0×0" rule applies only when all four anchors are set).
 - `MouseMoveEvent::pressed_button` is `Option<MouseButton>` in this fork,
   not a bitflags set — guard with `!= Some(MouseButton::Left)`.
+- **Event positions are surface-local, and the surface moves under the
+  cursor while you re-margin it** (origin(k) == pos(k)). Computing
+  `pos(start) + (event - press)` compounds the shift and the panel lags
+  the cursor, converging asymptotically. Correct update per event:
+  `pos(k+1) = pos(k) + (local(k+1) - local(press))` — accumulate against
+  the _current_ pos with the press-local reference held fixed.
+- Anchor the surface `TOP | LEFT` rather than leaving it unanchored:
+  compositors center unanchored layer surfaces and margin behavior for
+  them is not the documented-offset behavior you want; anchored edges
+  always honor margins.
 
 ## Cursor output resolution (no gpui cursor API)
 

@@ -25,8 +25,8 @@ pub struct Sticky {
 }
 
 struct Drag {
+    /// Pointer position (surface-local) at press.
     press: gpui::Point<gpui::Pixels>,
-    start: gpui::Point<gpui::Pixels>,
 }
 
 /// Open a sticky window. Unanchored layer surface: the margin IS the
@@ -49,7 +49,11 @@ pub fn spawn(cx: &mut App, cfg: &Config, title: String, index: usize) -> anyhow:
         kind: WindowKind::LayerShell(LayerShellOptions {
             namespace: "upperadd-sticky".into(),
             layer: Layer::Top,
-            anchor: Anchor::empty(),
+            // Anchored top+left (not empty): compositors center unanchored
+            // layer surfaces and may ignore/oddly-apply margins for them;
+            // anchored edges always honor margins — the standard way to
+            // make a draggable layer panel.
+            anchor: Anchor::TOP | Anchor::LEFT,
             exclusive_zone: Some(px(-1.)),
             margin: Some((pos.y, px(0.), px(0.), pos.x)),
             keyboard_interactivity: KeyboardInteractivity::None,
@@ -85,23 +89,27 @@ impl Sticky {
         window: &mut Window,
         _cx: &mut Context<Self>,
     ) {
-        self.drag = Some(Drag {
-            press: ev.position,
-            start: self.pos,
-        });
+        log::debug!("sticky drag start at {:?}", ev.position);
+        self.drag = Some(Drag { press: ev.position });
         window.refresh();
     }
 
     fn on_move(&mut self, ev: &MouseMoveEvent, window: &mut Window, _cx: &mut Context<Self>) {
         let Some(drag) = &self.drag else { return };
         if ev.pressed_button != Some(MouseButton::Left) {
+            log::debug!("sticky drag cancelled (button up missed)");
             self.drag = None;
             return;
         }
+        // Event positions are SURFACE-LOCAL, and the surface moves under the
+        // cursor as we re-margin it: origin(k) == pos(k). So the correct
+        // update is pos(k+1) = pos(k) + (local(k+1) - local(press)) —
+        // NOT pos(start) + delta, which lags the cursor compounding.
         self.pos = point(
-            drag.start.x + (ev.position.x - drag.press.x),
-            drag.start.y + (ev.position.y - drag.press.y),
+            self.pos.x + (ev.position.x - drag.press.x),
+            self.pos.y + (ev.position.y - drag.press.y),
         );
+        log::debug!("sticky drag to {:?}", self.pos);
         window.set_margin((self.pos.y, px(0.), px(0.), self.pos.x));
     }
 

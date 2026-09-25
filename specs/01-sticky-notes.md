@@ -52,3 +52,18 @@ be pinned at once. A sticky never takes the keyboard
 - **M1.5 skeleton**: `ua pin-test` spawns a placeholder sticky so the
   fork patch, dragging, and ✕ are verified early — same reasoning as
   testing `set_visible` in M1.
+
+## Update 2026-09-25 — resize + footer (implemented in M1.5)
+
+- Resize: all four edges via invisible 6 px strips (same ground-truth poll as
+  move; `cx.stop_propagation()` so strips beat the bars in overlap zones).
+  Left/top edges move the origin (opposite side pinned); right/bottom chase
+  the cursor from the fixed left/top edge. Min 280×180. Cursor: ↔/↕ on
+  strips, window-wide while the gesture is active.
+- Move: header AND new 28 px footer bar (metadata slot fills at M3). Cursor:
+  open hand on bars, fist while dragging, pointer on ↻/✕.
+- Poll rates: move 16 ms, resize 40 ms — each applied size change can show a
+  one-frame cut while the compositor applies the new surface size, so resize
+  steps slower. End state is always exact.
+- Bars round their own outer corners (`overflow_hidden` doesn't clip
+  children to rounded radii).

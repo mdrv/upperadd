@@ -8,8 +8,8 @@ description = "Wayland overlay to jump into markdown notes: fuzzy search, live p
 [dependencies]
 # gpui-ce fork via git tag (portable form; see /g/gpui-ce/MDRV.md §Registry).
 # Dep keys stay gpui/gpui_platform so `use` paths are unchanged.
-gpui = { package = "mdrv-gpui-ce", git = "https://github.com/mdrv/gpui-ce", tag = "mdrv-gpui-0.0.260925.1" }
-gpui_platform = { package = "mdrv-gpui-platform", git = "https://github.com/mdrv/gpui-ce", tag = "mdrv-gpui-0.0.260925.1", features = [
+gpui = { package = "mdrv-gpui-ce", git = "https://github.com/mdrv/gpui-ce", tag = "mdrv-gpui-0.0.260925.4" }
+gpui_platform = { package = "mdrv-gpui-platform", git = "https://github.com/mdrv/gpui-ce", tag = "mdrv-gpui-0.0.260925.4", features = [
 	"wayland",
 ] }
 mdrv-db = "0.5" # engine crate; bump to 0.5.1 + features=["turso"] when the TursoPort export ships

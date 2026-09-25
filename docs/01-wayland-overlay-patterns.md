@@ -65,3 +65,21 @@ monitor whose `x/y/width/height` box contains it; match that origin
 against `PlatformDisplay::bounds().origin` (±1.0 px) → `DisplayId` for
 `WindowOptions.display_id`. Works; keep a primary-display fallback for
 non-Hyprland sessions.
+
+## Resizing layer surfaces + cursor rules (tag 0.0.260925.4)
+
+- `Window::resize` stages `layer_surface.set_size`; with `set_margin` staging
+  too (tag .2), the present commit carries margin + size + buffer atomically.
+  Never rely on a committing setter mid-gesture: a commit that pairs a new
+  size with the old buffer gets scaled by the compositor (border smear).
+- Tag .4 applies the drawable resize synchronously and fires the gpui-core
+  callback from a spawn — the callback re-enters the App via
+  `AsyncApp::update`, which DEADLOCKS if called mid-update. Sync state,
+  deferred callbacks.
+- Cursor styles resolve per frame; a `set_window_cursor_style` request
+  (hitbox-less) overrides all hover styles for its frame — push it from
+  `render()` while a gesture is active for a stable drag/resize cursor.
+- Remaining cosmetic: the compositor applies a resize one frame behind the
+  buffer → transient cut at the leading edge during fast resizes. End state
+  exact. Full fix = ack_configure dance in the fork (deferred; not worth it
+  for v1).

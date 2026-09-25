@@ -3799,7 +3799,7 @@ dependencies = [
 [[package]]
 name = "mdrv-gpui-apple"
 version = "0.0.260925"
-source = "git+https://github.com/mdrv/gpui-ce?tag=mdrv-gpui-0.0.260925.1#c53b832653fb4fb1dabc4003923eae7aa8f5167f"
+source = "git+https://github.com/mdrv/gpui-ce?tag=mdrv-gpui-0.0.260925.4#cb20092559930255b49aab674478f340684dec4f"
 dependencies = [
  "anyhow",
  "block",
@@ -3825,7 +3825,7 @@ dependencies = [
 [[package]]
 name = "mdrv-gpui-ce"
 version = "0.0.260925"
-source = "git+https://github.com/mdrv/gpui-ce?tag=mdrv-gpui-0.0.260925.1#c53b832653fb4fb1dabc4003923eae7aa8f5167f"
+source = "git+https://github.com/mdrv/gpui-ce?tag=mdrv-gpui-0.0.260925.4#cb20092559930255b49aab674478f340684dec4f"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -3896,7 +3896,7 @@ dependencies = [
 [[package]]
 name = "mdrv-gpui-collections"
 version = "0.0.260925"
-source = "git+https://github.com/mdrv/gpui-ce?tag=mdrv-gpui-0.0.260925.1#c53b832653fb4fb1dabc4003923eae7aa8f5167f"
+source = "git+https://github.com/mdrv/gpui-ce?tag=mdrv-gpui-0.0.260925.4#cb20092559930255b49aab674478f340684dec4f"
 dependencies = [
  "indexmap",
  "mdrv-gpui-util",
@@ -3906,7 +3906,7 @@ dependencies = [
 [[package]]
 name = "mdrv-gpui-derive-refineable"
 version = "0.0.260925"
-source = "git+https://github.com/mdrv/gpui-ce?tag=mdrv-gpui-0.0.260925.1#c53b832653fb4fb1dabc4003923eae7aa8f5167f"
+source = "git+https://github.com/mdrv/gpui-ce?tag=mdrv-gpui-0.0.260925.4#cb20092559930255b49aab674478f340684dec4f"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3916,7 +3916,7 @@ dependencies = [
 [[package]]
 name = "mdrv-gpui-linux"
 version = "0.0.260925"
-source = "git+https://github.com/mdrv/gpui-ce?tag=mdrv-gpui-0.0.260925.1#c53b832653fb4fb1dabc4003923eae7aa8f5167f"
+source = "git+https://github.com/mdrv/gpui-ce?tag=mdrv-gpui-0.0.260925.4#cb20092559930255b49aab674478f340684dec4f"
 dependencies = [
  "accesskit",
  "accesskit_unix",
@@ -3963,7 +3963,7 @@ dependencies = [
 [[package]]
 name = "mdrv-gpui-macos"
 version = "0.0.260925"
-source = "git+https://github.com/mdrv/gpui-ce?tag=mdrv-gpui-0.0.260925.1#c53b832653fb4fb1dabc4003923eae7aa8f5167f"
+source = "git+https://github.com/mdrv/gpui-ce?tag=mdrv-gpui-0.0.260925.4#cb20092559930255b49aab674478f340684dec4f"
 dependencies = [
  "accesskit",
  "accesskit_macos",
@@ -4011,7 +4011,7 @@ dependencies = [
 [[package]]
 name = "mdrv-gpui-macros"
 version = "0.0.260925"
-source = "git+https://github.com/mdrv/gpui-ce?tag=mdrv-gpui-0.0.260925.1#c53b832653fb4fb1dabc4003923eae7aa8f5167f"
+source = "git+https://github.com/mdrv/gpui-ce?tag=mdrv-gpui-0.0.260925.4#cb20092559930255b49aab674478f340684dec4f"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -4022,7 +4022,7 @@ dependencies = [
 [[package]]
 name = "mdrv-gpui-media"
 version = "0.0.260925"
-source = "git+https://github.com/mdrv/gpui-ce?tag=mdrv-gpui-0.0.260925.1#c53b832653fb4fb1dabc4003923eae7aa8f5167f"
+source = "git+https://github.com/mdrv/gpui-ce?tag=mdrv-gpui-0.0.260925.4#cb20092559930255b49aab674478f340684dec4f"
 dependencies = [
  "anyhow",
  "bindgen 0.72.1",
@@ -4036,7 +4036,7 @@ dependencies = [
 [[package]]
 name = "mdrv-gpui-platform"
 version = "0.0.260925"
-source = "git+https://github.com/mdrv/gpui-ce?tag=mdrv-gpui-0.0.260925.1#c53b832653fb4fb1dabc4003923eae7aa8f5167f"
+source = "git+https://github.com/mdrv/gpui-ce?tag=mdrv-gpui-0.0.260925.4#cb20092559930255b49aab674478f340684dec4f"
 dependencies = [
  "console_error_panic_hook",
  "mdrv-gpui-apple",
@@ -4050,7 +4050,7 @@ dependencies = [
 [[package]]
 name = "mdrv-gpui-refineable"
 version = "0.0.260925"
-source = "git+https://github.com/mdrv/gpui-ce?tag=mdrv-gpui-0.0.260925.1#c53b832653fb4fb1dabc4003923eae7aa8f5167f"
+source = "git+https://github.com/mdrv/gpui-ce?tag=mdrv-gpui-0.0.260925.4#cb20092559930255b49aab674478f340684dec4f"
 dependencies = [
  "mdrv-gpui-derive-refineable",
 ]
@@ -4058,7 +4058,7 @@ dependencies = [
 [[package]]
 name = "mdrv-gpui-render"
 version = "0.0.260925"
-source = "git+https://github.com/mdrv/gpui-ce?tag=mdrv-gpui-0.0.260925.1#c53b832653fb4fb1dabc4003923eae7aa8f5167f"
+source = "git+https://github.com/mdrv/gpui-ce?tag=mdrv-gpui-0.0.260925.4#cb20092559930255b49aab674478f340684dec4f"
 dependencies = [
  "mdrv-gpui-ce",
  "naga 24.0.0",
@@ -4070,7 +4070,7 @@ dependencies = [
 [[package]]
 name = "mdrv-gpui-scheduler"
 version = "0.0.260925"
-source = "git+https://github.com/mdrv/gpui-ce?tag=mdrv-gpui-0.0.260925.1#c53b832653fb4fb1dabc4003923eae7aa8f5167f"
+source = "git+https://github.com/mdrv/gpui-ce?tag=mdrv-gpui-0.0.260925.4#cb20092559930255b49aab674478f340684dec4f"
 dependencies = [
  "async-task",
  "backtrace",
@@ -4085,7 +4085,7 @@ dependencies = [
 [[package]]
 name = "mdrv-gpui-shared-string"
 version = "0.0.260925"
-source = "git+https://github.com/mdrv/gpui-ce?tag=mdrv-gpui-0.0.260925.1#c53b832653fb4fb1dabc4003923eae7aa8f5167f"
+source = "git+https://github.com/mdrv/gpui-ce?tag=mdrv-gpui-0.0.260925.4#cb20092559930255b49aab674478f340684dec4f"
 dependencies = [
  "schemars",
  "serde",
@@ -4095,7 +4095,7 @@ dependencies = [
 [[package]]
 name = "mdrv-gpui-sum-tree"
 version = "0.0.260925"
-source = "git+https://github.com/mdrv/gpui-ce?tag=mdrv-gpui-0.0.260925.1#c53b832653fb4fb1dabc4003923eae7aa8f5167f"
+source = "git+https://github.com/mdrv/gpui-ce?tag=mdrv-gpui-0.0.260925.4#cb20092559930255b49aab674478f340684dec4f"
 dependencies = [
  "heapless 0.9.3",
  "log",
@@ -4106,7 +4106,7 @@ dependencies = [
 [[package]]
 name = "mdrv-gpui-util"
 version = "0.0.260925"
-source = "git+https://github.com/mdrv/gpui-ce?tag=mdrv-gpui-0.0.260925.1#c53b832653fb4fb1dabc4003923eae7aa8f5167f"
+source = "git+https://github.com/mdrv/gpui-ce?tag=mdrv-gpui-0.0.260925.4#cb20092559930255b49aab674478f340684dec4f"
 dependencies = [
  "anyhow",
  "log",
@@ -4116,7 +4116,7 @@ dependencies = [
 [[package]]
 name = "mdrv-gpui-web"
 version = "0.0.260925"
-source = "git+https://github.com/mdrv/gpui-ce?tag=mdrv-gpui-0.0.260925.1#c53b832653fb4fb1dabc4003923eae7aa8f5167f"
+source = "git+https://github.com/mdrv/gpui-ce?tag=mdrv-gpui-0.0.260925.4#cb20092559930255b49aab674478f340684dec4f"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
@@ -4139,7 +4139,7 @@ dependencies = [
 [[package]]
 name = "mdrv-gpui-wgpu"
 version = "0.0.260925"
-source = "git+https://github.com/mdrv/gpui-ce?tag=mdrv-gpui-0.0.260925.1#c53b832653fb4fb1dabc4003923eae7aa8f5167f"
+source = "git+https://github.com/mdrv/gpui-ce?tag=mdrv-gpui-0.0.260925.4#cb20092559930255b49aab674478f340684dec4f"
 dependencies = [
  "anyhow",
  "core-foundation",
@@ -4177,7 +4177,7 @@ dependencies = [
 [[package]]
 name = "mdrv-gpui-windows"
 version = "0.0.260925"
-source = "git+https://github.com/mdrv/gpui-ce?tag=mdrv-gpui-0.0.260925.1#c53b832653fb4fb1dabc4003923eae7aa8f5167f"
+source = "git+https://github.com/mdrv/gpui-ce?tag=mdrv-gpui-0.0.260925.4#cb20092559930255b49aab674478f340684dec4f"
 dependencies = [
  "accesskit",
  "accesskit_windows",

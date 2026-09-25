@@ -23,7 +23,7 @@ enum Ipc {
     Toggle,
     Show,
     Stop,
-    PinTest,
+    StickTest,
 }
 
 pub fn run(cfg: Config) -> anyhow::Result<()> {
@@ -99,7 +99,7 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
                         cx.update(|app| app.quit());
                         break;
                     }
-                    Ipc::PinTest => {
+                    Ipc::StickTest => {
                         pins += 1;
                         let index = pins;
                         let origin = output_origin;
@@ -107,8 +107,8 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
                         let index_tx = ui_index_tx.clone();
                         cx.update(|app| {
                             let body = format!(
-                                "# Pinned test #{index}\n\nStandalone pin-test sticky — pin \
-                                 real notes from the overlay with **P**.\n"
+                                "# Stick test #{index}\n\nStandalone stick-test sticky — press \
+                                 **S** on a real note to extract it.\n"
                             );
                             if let Err(err) = crate::sticky::spawn(
                                 app,
@@ -116,7 +116,7 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
                                 format!("Pinned test #{index}"),
                                 index,
                                 origin,
-                                ("pin-test".into(), 0),
+                                ("stick-test".into(), 0),
                                 body,
                                 index_tx,
                             ) {
@@ -172,7 +172,7 @@ fn accept_loop(
                 .unbounded_send(IndexCmd::Reindex)
                 .map(|_| "reindex started".to_string())
                 .map_err(|_| "index worker gone".to_string()),
-            "pin-test" => forward(&tx, Ipc::PinTest),
+            "stick-test" => forward(&tx, Ipc::StickTest),
             other => Err(format!("unknown verb {other:?}")),
         };
         let out = match reply {

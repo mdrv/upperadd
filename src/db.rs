@@ -15,7 +15,10 @@ use mdrv_db::{Op, PortValue, SqlKind};
 pub const DATA_DIR: &str = "/x/db/upperadd";
 pub const DB_NAME: &str = "upperadd";
 const SECTIONS: &str = "sections";
+const PINS: &str = "pins";
 const ACTOR: &str = "upperadd-index";
+/// v0.1 ships a single workspace; rows carry the name so more can exist.
+pub const DEFAULT_WORKSPACE: &str = "default";
 
 const COLUMNS: [&str; 7] = [
     "id",
@@ -72,6 +75,24 @@ fn create_indexes() -> Vec<String> {
     ]
 }
 
+fn create_pins() -> String {
+    // Pin state is WORKSPACE state, not note state: it must survive
+    // `ua reindex` (which resets only `sections`), so it gets its own table.
+    // One row per pinned section per workspace; `rank` = user order.
+    format!(
+        "CREATE TABLE IF NOT EXISTS {PINS} (\
+             id TEXT PRIMARY KEY, \
+             workspace TEXT NOT NULL, \
+             path TEXT NOT NULL, \
+             line INTEGER NOT NULL, \
+             rank INTEGER NOT NULL)"
+    )
+}
+
+fn pin_id(workspace: &str, path: &str, line: u32) -> String {
+    format!("{workspace}:{path}:{line}")
+}
+
 fn row_id(path: &str, line: u32) -> String {
     format!("{path}:{line}")
 }
@@ -123,7 +144,7 @@ impl Db {
         )
         .context("opening mdrv-db engine")?;
         let db = Self { engine };
-        let mut ddl = vec![create_sections()];
+        let mut ddl = vec![create_sections(), create_pins()];
         ddl.extend(create_indexes());
         db.engine.bootstrap(&ddl).context("bootstrapping schema")?;
         Ok(db)
@@ -209,6 +230,67 @@ impl Db {
             })
             .context("replacing file rows")?;
         Ok(())
+    }
+
+    /// Pinned section keys for `workspace`, in user-defined order.
+    pub fn pins(&self, workspace: &str) -> Result<Vec<(String, u32)>> {
+        let rows = self.select(
+            format!("SELECT path, line FROM {PINS} WHERE workspace = ? ORDER BY rank"),
+            vec![PortValue::Text(workspace.into())],
+        )?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                let path = row.get("path")?.as_str()?.to_string();
+                let line = row.get("line")?.as_i64()? as u32;
+                Some((path, line))
+            })
+            .collect())
+    }
+
+    /// Rewrite the whole pin list for `workspace` in one transaction
+    /// (`rank` = list index). Full rewrite keeps reorder/toggle/prune on
+    /// one code path — pin lists are tiny.
+    pub fn write_pins(&self, workspace: &str, pins: &[(String, u32)]) -> Result<()> {
+        let mut ops = vec![Op::Sql {
+            kind: SqlKind::Delete,
+            table: PINS.into(),
+            pk_col: "workspace".into(),
+            columns: vec![],
+            values: vec![],
+            pk: PortValue::Text(workspace.into()),
+        }];
+        for (rank, (path, line)) in pins.iter().enumerate() {
+            ops.push(Op::Sql {
+                kind: SqlKind::Insert,
+                table: PINS.into(),
+                pk_col: "id".into(),
+                columns: vec![
+                    "id".into(),
+                    "workspace".into(),
+                    "path".into(),
+                    "line".into(),
+                    "rank".into(),
+                ],
+                values: vec![
+                    PortValue::Text(pin_id(workspace, path, *line)),
+                    PortValue::Text(workspace.into()),
+                    PortValue::Text(path.clone()),
+                    PortValue::Int(*line as i64),
+                    PortValue::Int(rank as i64),
+                ],
+                pk: PortValue::Text(pin_id(workspace, path, *line)),
+            });
+        }
+        self.engine
+            .execute(MutateRequest {
+                actor: ACTOR.into(),
+                ops,
+                idem_key: None,
+                response: None,
+            })
+            .map(|_| ())
+            .map_err(|e| anyhow!("writing pins: {e}"))
     }
 
     pub fn delete_path(&self, path: &str) -> Result<()> {

@@ -203,6 +203,12 @@ impl Overlay {
                         cx.stop_propagation();
                         return;
                     }
+                    // Alt+Up/Down: reorder pinned sections (insert-mode alias).
+                    "up" | "down" if ks.modifiers.alt => {
+                        self.move_pin_selected(ks.key == "up", cx);
+                        cx.stop_propagation();
+                        return;
+                    }
                     "up" => {
                         if self.move_selection(-1) {
                             self.request_preview(cx);
@@ -246,6 +252,11 @@ impl Overlay {
                     self.hide(window, cx);
                     cx.stop_propagation();
                 }
+                // Alt+J/K: reorder pinned sections (before the plain j/k arms).
+                "j" | "k" if ks.modifiers.alt => {
+                    self.move_pin_selected(ks.key == "j", cx);
+                    cx.stop_propagation();
+                }
                 "j" | "down" => {
                     if self.move_selection(1) {
                         self.request_preview(cx);
@@ -260,9 +271,15 @@ impl Overlay {
                     }
                     cx.stop_propagation();
                 }
-                // P/Tab pin the selected note (spec 01).
+                // P/Tab: toggle pin-at-top for the selected section
+                // (workspace state, survives restarts — spec 01 §2).
                 "p" | "tab" => {
-                    self.pin_selected(cx);
+                    self.toggle_pin_selected(cx);
+                    cx.stop_propagation();
+                }
+                // S: extract the selected section into a sticky window.
+                "s" => {
+                    self.stick_selected(cx);
                     cx.stop_propagation();
                 }
                 "i" => {
@@ -375,7 +392,33 @@ impl Overlay {
     /// overlay stays open with its state intact; the section content is
     /// fetched fresh so the sticky shows the note even if the preview pane
     /// hasn't loaded it yet.
-    fn pin_selected(&mut self, cx: &mut Context<Self>) {
+    /// Toggle pin-at-top for the selected section, then re-query so the
+    /// new order comes back from the worker (single source of truth).
+    fn toggle_pin_selected(&mut self, cx: &mut Context<Self>) {
+        let Some(hit) = self.search.results.get(self.search.selected) else {
+            return;
+        };
+        let _ = self.index_tx.unbounded_send(IndexCmd::TogglePin {
+            path: hit.path.clone(),
+            line: hit.line,
+        });
+        self.request_results(cx);
+    }
+
+    /// Move the selected pin one slot up/down within the pinned group.
+    fn move_pin_selected(&mut self, up: bool, cx: &mut Context<Self>) {
+        let Some(hit) = self.search.results.get(self.search.selected) else {
+            return;
+        };
+        let _ = self.index_tx.unbounded_send(IndexCmd::MovePin {
+            path: hit.path.clone(),
+            line: hit.line,
+            up,
+        });
+        self.request_results(cx);
+    }
+
+    fn stick_selected(&mut self, cx: &mut Context<Self>) {
         let Some(hit) = self.search.results.get(self.search.selected) else {
             return;
         };
@@ -466,11 +509,25 @@ impl Overlay {
             .justify_center()
             .when(selected, |d| d.bg(hsla(220.0, 0.30, 0.32, 0.55)))
             .child(
+                // Pinned rows get an accent dot before the title.
                 div()
-                    .text_size(px(13.0))
-                    .text_color(hsla(0.0, 0.0, 0.92, 0.95))
-                    .truncate()
-                    .child(hit.title.clone()),
+                    .flex()
+                    .gap_1()
+                    .when(hit.pinned, |d| {
+                        d.child(
+                            div()
+                                .text_size(px(13.0))
+                                .text_color(hsla(120.0, 0.6, 0.6, 0.95))
+                                .child("•"),
+                        )
+                    })
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .text_color(hsla(0.0, 0.0, 0.92, 0.95))
+                            .truncate()
+                            .child(hit.title.clone()),
+                    ),
             )
             .child(
                 div()
@@ -529,7 +586,7 @@ impl Overlay {
                             msg.to_string()
                         }
                         _ => format!(
-                            "{} result{} · Esc⇥normal · j/k move · P pin · ⇧R reindex · ⏎ edit",
+                            "{} result{} · Esc⇥normal · P pin · S sticky · Alt+J/K reorder · ⇧R reindex · ⏎ edit",
                             self.search.len(),
                             if self.search.len() == 1 { "" } else { "s" }
                         ),

@@ -112,3 +112,24 @@ selection (`write_to_clipboard`/`write_to_primary`). No fork patch needed.
   no opacity fade (§28 animation freeze).
 - **Timing**: with the M3 markdown body, not before — the primitive needs
   the real text layout; drag-selecting the placeholder is pointless.
+
+## Update 2026-09-25 — "pin" ≠ sticky: pinned results + S to extract
+
+Terminology split (owner decision):
+
+- **Pin (P / Tab, normal mode)** — toggle the selected section into the
+  _pinned group_ at the top of the results list. Multiple pins; user-defined
+  order via **Alt+J/K** (normal) / **Alt+Up/Down** (insert). Accent dot
+  marks pinned rows. Pins are **workspace state**, not note state: stored in
+  the DB `pins` table (id, workspace, path, line, rank) so they survive
+  daemon restarts _and_ `ua reindex`. v0.1 has a single implicit workspace
+  (`default`); the storage shape already carries a workspace column for a
+  future multi-workspace UI. Pin identity is (path, section line) — an edit
+  that shifts heading lines drops that pin (pruned against the corpus).
+- **Sticky (S, normal mode)** — extract the selected section into the
+  always-on-top sticky window (what this spec used to call pin). The old
+  P/Tab-for-sticky binding is gone; `ua pin-test` became `ua stick-test`.
+- Worker owns the pinned list (single source of truth); the overlay toggles
+  /reorders over IPC and re-queries, so ordering is computed in exactly one
+  place (`worker::assemble_hits`, unit-tested: pins lead in user order, cap
+  applies to the tail only).

@@ -32,8 +32,8 @@ enum Command {
     Status,
     /// Rebuild the search index from the notes dir
     Reindex,
-    /// Spawn a test sticky note (M1.5 skeleton)
-    PinTest,
+    /// Spawn a test sticky note
+    StickTest,
 }
 
 #[derive(Subcommand, Debug)]
@@ -67,7 +67,7 @@ pub fn run() -> anyhow::Result<()> {
         Command::Stop => send_verb("stop"),
         Command::Status => send_verb("status"),
         Command::Reindex => send_verb("reindex"),
-        Command::PinTest => send_verb("pin-test"),
+        Command::StickTest => send_verb("stick-test"),
     }
 }
 

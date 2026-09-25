@@ -39,6 +39,17 @@ pub enum IndexCmd {
         line: u32,
         resp: oneshot::Sender<Option<String>>,
     },
+    /// Toggle pin-at-top for a section (workspace state, DB-backed).
+    TogglePin {
+        path: String,
+        line: u32,
+    },
+    /// Move a pinned section one slot up/down within the pinned group.
+    MovePin {
+        path: String,
+        line: u32,
+        up: bool,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -48,6 +59,8 @@ pub struct SearchHit {
     pub title: String,
     pub section_mtime: i64,
     pub score: i64,
+    /// Pinned sections sort to the top in user-defined order.
+    pub pinned: bool,
 }
 
 /// Spawn the worker + fs-watcher threads; returns the command sender.
@@ -117,6 +130,7 @@ fn run(notes_dir: PathBuf, separator: Separator, mut rx: UnboundedReceiver<Index
     if let Err(err) = worker.initial_import() {
         error!("initial index: {err:#}");
     }
+    worker.load_pins();
     while let Some(cmd) = futures::executor::block_on(rx.next()) {
         worker.handle(cmd, &mut rx);
     }
@@ -137,6 +151,7 @@ fn drain_degraded(mut rx: UnboundedReceiver<IndexCmd>) {
                 let _ = resp.send(None);
             }
             IndexCmd::Reindex | IndexCmd::FilesChanged(_) => {}
+            IndexCmd::TogglePin { .. } | IndexCmd::MovePin { .. } => {}
         }
     }
 }
@@ -161,6 +176,9 @@ struct Worker {
     separator: Separator,
     db: Db,
     corpus: Vec<SectionMeta>,
+    /// Pinned sections of the default workspace, user-defined order.
+    /// DB-backed (survives restarts); pruned against the corpus.
+    pinned: Vec<(String, u32)>,
     /// True while the table has never been populated: fresh sections fall
     /// back to the file mtime instead of "now".
     cold: bool,
@@ -174,6 +192,7 @@ impl Worker {
             separator,
             db,
             corpus: Vec::new(),
+            pinned: Vec::new(),
             cold,
         }
     }
@@ -212,6 +231,8 @@ impl Worker {
                 let content = self.db.section_content(&path, line).ok().flatten();
                 let _ = resp.send(content);
             }
+            IndexCmd::TogglePin { path, line } => self.toggle_pin(path, line),
+            IndexCmd::MovePin { path, line, up } => self.move_pin(path, line, up),
             IndexCmd::Stats { resp } => {
                 let _ = resp.send(self.stats());
             }
@@ -224,6 +245,7 @@ impl Worker {
         if !abs.exists() {
             self.db.delete_path(&rel)?;
             self.corpus.retain(|m| m.path != rel);
+            self.retain_valid_pins();
             info!("index: removed {rel}");
             return Ok(());
         }
@@ -307,6 +329,7 @@ impl Worker {
 
     fn reload_corpus(&mut self) -> Result<()> {
         self.corpus = self.db.all_meta()?;
+        self.retain_valid_pins();
         Ok(())
     }
 
@@ -318,6 +341,74 @@ impl Worker {
             title: r.title.clone(),
             section_mtime: r.section_mtime,
         }));
+        self.retain_valid_pins();
+    }
+
+    /// Drop pins whose (path, line) left the corpus (file removed, or an
+    /// edit shifted heading lines) and persist the prune.
+    fn retain_valid_pins(&mut self) {
+        let before = self.pinned.len();
+        self.pinned
+            .retain(|(p, l)| self.corpus.iter().any(|m| &m.path == p && &m.line == l));
+        if self.pinned.len() != before {
+            if let Err(err) = self
+                .db
+                .write_pins(crate::db::DEFAULT_WORKSPACE, &self.pinned)
+            {
+                warn!("pruning pins: {err:#}");
+            }
+        }
+    }
+
+    /// Load pins from the DB at boot (order preserved), pruning stale keys.
+    fn load_pins(&mut self) {
+        match self.db.pins(crate::db::DEFAULT_WORKSPACE) {
+            Ok(pins) => {
+                self.pinned = pins;
+                self.retain_valid_pins();
+            }
+            Err(err) => warn!("loading pins: {err:#}"),
+        }
+    }
+
+    fn toggle_pin(&mut self, path: String, line: u32) {
+        if let Some(pos) = self
+            .pinned
+            .iter()
+            .position(|(p, l)| *p == path && *l == line)
+        {
+            self.pinned.remove(pos);
+        } else {
+            self.pinned.push((path, line));
+        }
+        if let Err(err) = self
+            .db
+            .write_pins(crate::db::DEFAULT_WORKSPACE, &self.pinned)
+        {
+            warn!("writing pins: {err:#}");
+        }
+    }
+
+    fn move_pin(&mut self, path: String, line: u32, up: bool) {
+        let pos = match self
+            .pinned
+            .iter()
+            .position(|(p, l)| *p == path && *l == line)
+        {
+            Some(pos) => pos,
+            None => return,
+        };
+        let delta: isize = if up { -1 } else { 1 };
+        let target = (pos as isize + delta).clamp(0, self.pinned.len() as isize - 1) as usize;
+        if target != pos {
+            self.pinned.swap(pos, target);
+            if let Err(err) = self
+                .db
+                .write_pins(crate::db::DEFAULT_WORKSPACE, &self.pinned)
+            {
+                warn!("writing pins: {err:#}");
+            }
+        }
     }
 
     fn stats(&self) -> String {
@@ -360,6 +451,7 @@ impl Worker {
                         title: m.title.clone(),
                         section_mtime: m.section_mtime,
                         score: 0,
+                        pinned: false,
                     },
                     &mut hits,
                 );
@@ -374,6 +466,7 @@ impl Worker {
                             title: m.title.clone(),
                             section_mtime: m.section_mtime,
                             score: score + 200,
+                            pinned: false,
                         },
                         &mut hits,
                     );
@@ -385,6 +478,7 @@ impl Worker {
                             title: m.title.clone(),
                             section_mtime: m.section_mtime,
                             score: score + 100,
+                            pinned: false,
                         },
                         &mut hits,
                     );
@@ -400,6 +494,7 @@ impl Worker {
                                 title: m.title,
                                 section_mtime: m.section_mtime,
                                 score: 50,
+                                pinned: false,
                             },
                             &mut hits,
                         );
@@ -409,17 +504,52 @@ impl Worker {
             }
         }
 
-        let mut hits: Vec<SearchHit> = hits.into_values().collect();
-        hits.sort_by(|a, b| {
-            b.score
-                .cmp(&a.score)
-                .then(b.section_mtime.cmp(&a.section_mtime))
-                .then(a.path.cmp(&b.path))
-                .then(a.line.cmp(&b.line))
-        });
-        hits.truncate(SEARCH_LIMIT as usize);
-        hits
+        // Pinned sections first (user order, always visible — even when a
+        // query wouldn't surface them), then the scored hits.
+        let rest: Vec<SearchHit> = hits
+            .into_values()
+            .filter(|h| !self.is_pinned(&h.path, h.line))
+            .collect();
+        assemble_hits(&self.pinned, &self.corpus, rest, SEARCH_LIMIT as usize)
     }
+
+    fn is_pinned(&self, path: &str, line: u32) -> bool {
+        self.pinned.iter().any(|(p, l)| p == path && *l == line)
+    }
+}
+
+/// Pinned sections first (user order; stale keys skipped), then the scored
+/// hits in score → mtime → path → line order. The cap applies to the tail
+/// only, so pins always surface even in a full list.
+fn assemble_hits(
+    pinned: &[(String, u32)],
+    corpus: &[SectionMeta],
+    mut rest: Vec<SearchHit>,
+    limit: usize,
+) -> Vec<SearchHit> {
+    let mut out: Vec<SearchHit> = Vec::new();
+    for (path, line) in pinned {
+        if let Some(m) = corpus.iter().find(|m| &m.path == path && &m.line == line) {
+            out.push(SearchHit {
+                path: m.path.clone(),
+                line: m.line,
+                title: m.title.clone(),
+                section_mtime: m.section_mtime,
+                score: 0,
+                pinned: true,
+            });
+        }
+    }
+    rest.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then(b.section_mtime.cmp(&a.section_mtime))
+            .then(a.path.cmp(&b.path))
+            .then(a.line.cmp(&b.line))
+    });
+    rest.truncate(limit.saturating_sub(out.len()));
+    out.extend(rest);
+    out
 }
 
 /// Greedy subsequence match with bonuses for consecutive and word-start
@@ -460,6 +590,56 @@ fn fuzzy_score(query: &str, text: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn meta(path: &str, line: u32) -> SectionMeta {
+        SectionMeta {
+            path: path.into(),
+            line,
+            title: path.into(),
+            section_mtime: 0,
+        }
+    }
+
+    fn hit(path: &str, line: u32, score: i64) -> SearchHit {
+        SearchHit {
+            path: path.into(),
+            line,
+            title: path.into(),
+            section_mtime: 0,
+            score,
+            pinned: false,
+        }
+    }
+
+    #[test]
+    fn pins_lead_in_user_order_and_cap_spares_them() {
+        let corpus = vec![meta("a.md", 1), meta("b.md", 5), meta("c.md", 9)];
+        // "gone.md" left the corpus: silently skipped.
+        let pinned = vec![
+            ("c.md".to_string(), 9),
+            ("a.md".to_string(), 1),
+            ("gone.md".to_string(), 3),
+        ];
+        let rest = vec![hit("b.md", 5, 10), hit("a.md", 3, 99)];
+
+        let out = assemble_hits(&pinned, &corpus, rest.clone(), 100);
+        assert_eq!(out.len(), 4);
+        assert_eq!((out[0].path.as_str(), out[0].line), ("c.md", 9));
+        assert!(out[0].pinned);
+        // User order, not score order.
+        assert_eq!((out[1].path.as_str(), out[1].line), ("a.md", 1));
+        assert!(out[1].pinned);
+        // Tail sorted by score.
+        assert_eq!((out[2].path.as_str(), out[2].line), ("a.md", 3));
+        assert!(!out[2].pinned);
+        assert_eq!(out[3].path, "b.md");
+
+        // Cap applies to the tail only — pins always surface.
+        let out = assemble_hits(&pinned, &corpus, rest, 3);
+        assert_eq!(out.len(), 3);
+        assert!(out[0].pinned && out[1].pinned);
+        assert_eq!(out[2].path, "a.md");
+    }
 
     #[test]
     fn fuzzy_matches_subsequences_and_rewards_words() {

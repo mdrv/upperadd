@@ -160,6 +160,7 @@ mod tests {
             title: path.into(),
             section_mtime: 0,
             score: 0,
+            pinned: false,
         }
     }
 

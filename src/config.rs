@@ -7,7 +7,7 @@ use serde::Deserialize;
 /// Missing file = all defaults; invalid file = hard error (the daemon
 /// refuses to boot with a broken config, visible in journald); unknown
 /// keys are ignored.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub notes: Notes,
@@ -27,7 +27,7 @@ impl Default for Config {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Notes {
     pub dir: PathBuf,
@@ -41,7 +41,7 @@ impl Default for Notes {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Window {
     /// left panel background opacity (0–1)
@@ -110,7 +110,7 @@ pub enum NamedOutput {
     Primary,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Sections {
     /// "h1" (default) or "hr" (also split on lone blank-line-delimited ---)
@@ -133,7 +133,7 @@ pub enum Separator {
     Hr,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Editor {
     pub command: String,

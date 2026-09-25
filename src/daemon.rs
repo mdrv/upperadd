@@ -19,6 +19,7 @@ enum Ipc {
     Toggle,
     Show,
     Stop,
+    PinTest,
 }
 
 pub fn run(cfg: Config) -> anyhow::Result<()> {
@@ -46,6 +47,7 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
         // §16.9: ONE persistent window, created hidden (show: false), never
         // destroyed; Layer::Top per AGENTS.md fork rules.
         let display_id = resolve_display_id(cx, cfg.window.output);
+        let overlay_cfg = cfg.clone();
         let options = WindowOptions {
             titlebar: None,
             show: false,
@@ -68,7 +70,8 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
             }),
             ..Default::default()
         };
-        let handle = match cx.open_window(options, |_, cx| cx.new(|cx| Overlay::new(cfg, cx))) {
+        let handle = match cx.open_window(options, |_, cx| cx.new(|cx| Overlay::new(overlay_cfg, cx)))
+        {
             Ok(handle) => handle,
             Err(err) => {
                 log::error!("opening overlay window: {err:#}");
@@ -81,11 +84,23 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
         // §16.1: socket thread → unbounded channel → UI task; no blocking
         // calls inside async tasks.
         cx.spawn(async move |cx: &mut AsyncApp| {
+            let mut pins = 0usize;
             while let Some(msg) = rx.next().await {
                 match msg {
                     Ipc::Stop => {
                         cx.update(|app| app.quit());
                         break;
+                    }
+                    Ipc::PinTest => {
+                        pins += 1;
+                        let index = pins;
+                        cx.update(|app| {
+                            if let Err(err) =
+                                crate::sticky::spawn(app, &cfg, format!("Pinned test #{index}"), index)
+                            {
+                                warn!("spawning sticky: {err:#}");
+                            }
+                        });
                     }
                     Ipc::Toggle | Ipc::Show => {
                         let toggle = matches!(msg, Ipc::Toggle);
@@ -128,6 +143,7 @@ fn accept_loop(listener: UnixListener, tx: UnboundedSender<Ipc>) {
             "stop" => forward(&tx, Ipc::Stop),
             "status" => Ok("running".into()),
             "reindex" => Ok("no index yet (M2)".into()),
+            "pin-test" => forward(&tx, Ipc::PinTest),
             other => Err(format!("unknown verb {other:?}")),
         };
         let out = match reply {

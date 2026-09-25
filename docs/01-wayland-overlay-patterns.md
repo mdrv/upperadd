@@ -23,7 +23,8 @@ The §16.2 fallback (empty render + `set_input_region(Some(&[]))`) is
 ## Drag via runtime `set_margin` (fork patch, tag 0.0.260925.1)
 
 `Anchor::TOP | Anchor::LEFT` + `margin = position` + `Window::set_margin`
-(commits immediately, like the other runtime setters). Final form after
+(stages only since tag .2 — the change lands with the next presented frame,
+atomically with any staged resize and the new buffer). Final form after
 three failed event-driven attempts: **poll-based ground-truth drag**.
 Event-driven drag cannot be made smooth:
 
@@ -76,6 +77,17 @@ non-Hyprland sessions.
   callback from a spawn — the callback re-enters the App via
   `AsyncApp::update`, which DEADLOCKS if called mid-update. Sync state,
   deferred callbacks.
+- Corners resize both axes via `ResizeDir` (8 directions). Two orthogonal
+  predicates per axis: `moves_x/y` — the grabbed edge chases the cursor,
+  clamped to min size — and `active_x/y` — whether the direction touches
+  the axis at all. Forgetting `active_*` makes a pure edge resize drag the
+  _other_ axis along with it (every direction "wanted" a size from the
+  cursor); a non-active axis keeps the snapshot size.
+- Resize polls at the same 16 ms as move. There is no easing — every poll
+  jumps straight to the cursor — so poll rate is the upper bound on how far
+  a moving edge trails the pointer, and small fast steps keep each
+  compositor size-apply transient negligible (the earlier 40 ms made fewer
+  but larger jumps).
 - Cursor styles resolve per frame; a `set_window_cursor_style` request
   (hitbox-less) overrides all hover styles for its frame — push it from
   `render()` while a gesture is active for a stable drag/resize cursor.

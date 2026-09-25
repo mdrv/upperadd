@@ -16,16 +16,20 @@ const MIN_W: f32 = 280.0;
 const MIN_H: f32 = 180.0;
 /// Width/height of the invisible edge hit strips.
 const EDGE: f32 = 6.0;
+/// Corner grab squares (larger than edge strips: corners are the hardest
+/// target to hit, and they resize both axes at once).
+const CORNER: f32 = 12.0;
 /// First sticky's offset from the output's top-left; each next one cascades.
 const BASE_POS: f32 = 100.0;
 const CASCADE: f32 = 24.0;
 /// Cursor poll rate while moving (window follows cursor, so every tick
 /// redraws anyway).
 const MOVE_POLL: Duration = Duration::from_millis(16);
-/// Cursor poll rate while resizing. Each applied size change can show a
-/// one-frame cut on the compositor (it applies the new surface size a frame
-/// behind the buffer), so resize steps slower — imperceptible for a drag.
-const RESIZE_POLL: Duration = Duration::from_millis(40);
+/// Cursor poll rate while resizing. Equal to the move rate: the sticky is
+/// not eased — every poll jumps straight to the cursor — so this is the
+/// upper bound on how far a moving edge trails the pointer, and small fast
+/// steps keep each compositor size-apply visually negligible.
+const RESIZE_POLL: Duration = MOVE_POLL;
 /// A fast fling exits the surface at once; keep following the cursor while
 /// it is outside, but end the gesture after this long without re-entry.
 const GESTURE_LEAVE_GRACE: Duration = Duration::from_millis(250);
@@ -35,7 +39,7 @@ const GESTURE_LEAVE_GRACE: Duration = Duration::from_millis(250);
 /// resize. Move gestures don't need it (the window follows the cursor).
 const RESIZE_EDGE_BAND: f32 = 24.0;
 
-/// Which edge a resize drag started from.
+/// Which cardinal edge a resize drag started from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Edge {
     Left,
@@ -46,10 +50,82 @@ enum Edge {
 
 impl Edge {
     fn cursor(self) -> CursorStyle {
+        self.dir().cursor()
+    }
+
+    fn dir(self) -> ResizeDir {
         match self {
-            Edge::Left | Edge::Right => CursorStyle::ResizeLeftRight,
-            Edge::Top | Edge::Bottom => CursorStyle::ResizeUpDown,
+            Edge::Left => ResizeDir::Left,
+            Edge::Right => ResizeDir::Right,
+            Edge::Top => ResizeDir::Top,
+            Edge::Bottom => ResizeDir::Bottom,
         }
+    }
+}
+
+/// Which corner a resize drag started from (both axes at once).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Corner {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl Corner {
+    fn dir(self) -> ResizeDir {
+        match self {
+            Corner::TopLeft => ResizeDir::TopLeft,
+            Corner::TopRight => ResizeDir::TopRight,
+            Corner::BottomLeft => ResizeDir::BottomLeft,
+            Corner::BottomRight => ResizeDir::BottomRight,
+        }
+    }
+}
+
+/// The axis-resolved resize direction: which edges move and which stay put.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResizeDir {
+    Left,
+    Right,
+    Top,
+    Bottom,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl ResizeDir {
+    fn cursor(self) -> CursorStyle {
+        match self {
+            ResizeDir::Left | ResizeDir::Right => CursorStyle::ResizeLeftRight,
+            ResizeDir::Top | ResizeDir::Bottom => CursorStyle::ResizeUpDown,
+            ResizeDir::TopLeft | ResizeDir::BottomRight => CursorStyle::ResizeUpLeftDownRight,
+            ResizeDir::TopRight | ResizeDir::BottomLeft => CursorStyle::ResizeUpRightDownLeft,
+        }
+    }
+
+    /// Whether the left edge (x origin) follows the cursor.
+    fn moves_x(self) -> bool {
+        matches!(self, ResizeDir::Left | ResizeDir::TopLeft | ResizeDir::BottomLeft)
+    }
+
+    /// Whether the top edge (y origin) follows the cursor.
+    fn moves_y(self) -> bool {
+        matches!(self, ResizeDir::Top | ResizeDir::TopLeft | ResizeDir::TopRight)
+    }
+
+    /// Whether this direction drives the width at all — a pure vertical
+    /// resize leaves the snapshot width alone.
+    fn active_x(self) -> bool {
+        !matches!(self, ResizeDir::Top | ResizeDir::Bottom)
+    }
+
+    /// Whether this direction drives the height at all — a pure horizontal
+    /// resize leaves the snapshot height alone.
+    fn active_y(self) -> bool {
+        !matches!(self, ResizeDir::Left | ResizeDir::Right)
     }
 }
 
@@ -63,7 +139,7 @@ enum Gesture {
         left_at: Option<Instant>,
     },
     Resize {
-        edge: Edge,
+        dir: ResizeDir,
         /// Position/size at press; edges that must stay put derive their
         /// target from the snapshot, never from accumulated deltas.
         start_pos: Point<Pixels>,
@@ -82,13 +158,14 @@ impl Gesture {
     fn cursor(&self) -> CursorStyle {
         match self {
             Gesture::Move { .. } => CursorStyle::ClosedHand,
-            Gesture::Resize { edge, .. } => edge.cursor(),
+            Gesture::Resize { dir, .. } => dir.cursor(),
         }
     }
 }
 
 /// A pinned note: read-only, always on top (`Layer::Top`), never takes the
-/// keyboard, draggable by its header, resizable by its edges, closable via ✕.
+/// keyboard, draggable by its header, resizable by its edges and corners,
+/// closable via ✕.
 /// M1.5 skeleton — the body is a placeholder until the M3 markdown pipeline
 /// lands (spec 01).
 pub struct Sticky {
@@ -203,18 +280,19 @@ impl Sticky {
 
     fn on_edge_down(
         &mut self,
-        edge: Edge,
+        dir: ResizeDir,
         ev: &MouseDownEvent,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Edge strips overlap the header/footer bars; without this the
-        // bar's move handler fires after ours and overwrites the gesture.
+        // Edge/corner strips overlap the header/footer bars; without this
+        // the bar's move handler fires after ours and overwrites the
+        // gesture.
         cx.stop_propagation();
-        debug!("sticky resize start {:?} at {:?}", edge, ev.position);
+        debug!("sticky resize start {:?} at {:?}", dir, ev.position);
         self.start_gesture(
             Gesture::Resize {
-                edge,
+                dir,
                 start_pos: self.pos,
                 start_size: self.size,
                 left_at: None,
@@ -282,45 +360,31 @@ impl Sticky {
                 }
             }
             Gesture::Resize {
-                edge,
+                dir,
                 start_pos,
                 start_size,
                 ..
             } => {
                 let (mut pos, mut size) = (*start_pos, *start_size);
-                match edge {
-                    // Edges whose opposite side stays put: the moving edge
-                    // chases the cursor, the size comes from the snapshot.
-                    Edge::Left => {
-                        let right = start_pos.x + start_size.width;
-                        pos.x = round(local.x);
-                        size.width = round(right - pos.x);
-                        if f32::from(size.width) < MIN_W {
-                            size.width = px(MIN_W);
-                            pos.x = round(right - px(MIN_W));
-                        }
-                    }
-                    Edge::Top => {
-                        let bottom = start_pos.y + start_size.height;
-                        pos.y = round(local.y);
-                        size.height = round(bottom - pos.y);
-                        if f32::from(size.height) < MIN_H {
-                            size.height = px(MIN_H);
-                            pos.y = round(bottom - px(MIN_H));
-                        }
-                    }
-                    // Right/bottom edges: the fixed left/top edge is
-                    // self.pos (never changes during the gesture), so width/
-                    // height is just cursor − edge. Deriving these from the
-                    // snapshot instead mixes frames — `grab` is surface-
-                    // local while `local` is output-local — which jumps the
-                    // size by `pos` at press.
-                    Edge::Right => {
-                        size.width = round((local.x - self.pos.x).max(px(MIN_W)));
-                    }
-                    Edge::Bottom => {
-                        size.height = round((local.y - self.pos.y).max(px(MIN_H)));
-                    }
+                // Snapshot edges never move; moving edges chase the cursor
+                // with a min-size clamp. Right/bottom sizes come from the
+                // live self.pos (fixed for the whole gesture) — deriving
+                // them from the snapshot mixes frames (surface-local press
+                // vs output-local cursor) and jumps the size at press.
+                // Axes the direction doesn't touch keep the snapshot size.
+                let right = round(start_pos.x + start_size.width);
+                let bottom = round(start_pos.y + start_size.height);
+                if dir.moves_x() {
+                    pos.x = round(local.x).min(right - px(MIN_W));
+                    size.width = round(right - pos.x);
+                } else if dir.active_x() {
+                    size.width = round((local.x - self.pos.x).max(px(MIN_W)));
+                }
+                if dir.moves_y() {
+                    pos.y = round(local.y).min(bottom - px(MIN_H));
+                    size.height = round(bottom - pos.y);
+                } else if dir.active_y() {
+                    size.height = round((local.y - self.pos.y).max(px(MIN_H)));
                 }
                 if size.width != self.size.width || size.height != self.size.height {
                     self.size = size;
@@ -406,7 +470,7 @@ impl Sticky {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let listener = cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
-            this.on_edge_down(edge, ev, window, cx);
+            this.on_edge_down(edge.dir(), ev, window, cx);
         });
         let base = div()
             .absolute()
@@ -417,6 +481,30 @@ impl Sticky {
             Edge::Right => base.top_0().bottom_0().right_0().w(px(EDGE)),
             Edge::Top => base.top_0().left_0().right_0().h(px(EDGE)),
             Edge::Bottom => base.bottom_0().left_0().right_0().h(px(EDGE)),
+        }
+    }
+
+    /// Corner grab squares, painted above the edge strips; resize both axes
+    /// at once like a true window.
+    fn render_corner(
+        &self,
+        corner: Corner,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let dir = corner.dir();
+        let listener = cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+            this.on_edge_down(dir, ev, window, cx);
+        });
+        let base = div()
+            .absolute()
+            .size(px(CORNER))
+            .cursor(dir.cursor())
+            .on_mouse_down(MouseButton::Left, listener);
+        match corner {
+            Corner::TopLeft => base.top_0().left_0(),
+            Corner::TopRight => base.top_0().right_0(),
+            Corner::BottomLeft => base.bottom_0().left_0(),
+            Corner::BottomRight => base.bottom_0().right_0(),
         }
     }
 }
@@ -474,5 +562,9 @@ impl Render for Sticky {
             .child(self.render_edge(Edge::Right, cx))
             .child(self.render_edge(Edge::Top, cx))
             .child(self.render_edge(Edge::Bottom, cx))
+            .child(self.render_corner(Corner::TopLeft, cx))
+            .child(self.render_corner(Corner::TopRight, cx))
+            .child(self.render_corner(Corner::BottomLeft, cx))
+            .child(self.render_corner(Corner::BottomRight, cx))
     }
 }

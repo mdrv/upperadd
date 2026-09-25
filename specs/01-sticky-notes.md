@@ -67,3 +67,26 @@ be pinned at once. A sticky never takes the keyboard
   steps slower. End state is always exact.
 - Bars round their own outer corners (`overflow_hidden` doesn't clip
   children to rounded radii).
+
+## Update 2026-09-25 — corner resize + poll tuning
+
+- **Corner resize**: four 12 px grab squares (`Corner` enum, painted above
+  the edge strips and bars, `stop_propagation` so nothing beneath
+  double-fires) resizing both axes at once like a true window. Edges and
+  corners resolve into one `ResizeDir` (8 variants) with per-axis
+  predicates: `moves_x/y` (the grabbed edge chases the cursor, clamped to
+  the min size) vs `active_x/y` (whether the direction touches the axis at
+  all — a non-active axis keeps the snapshot size). The first cut lacked
+  `active_*`, so right-edge drags also resized the height and vice versa.
+  Cursors: `ResizeUpLeftDownRight` (↖↘) and `ResizeUpRightDownLeft` (↗↙),
+  window-wide during the gesture.
+- **Resize poll = 16 ms** (was 40 ms): there is no easing in the gesture —
+  every poll jumps straight to the cursor — so poll rate is the bound on
+  pointer lag, and small fast steps keep each compositor size-apply
+  transient negligible.
+- Fork tag `mdrv-gpui-0.0.260925.4` (required): `Window::resize` applies the
+  wgpu surface/drawable resize synchronously (deferred, it committed staged
+  sizes with old buffers → border smear); the gpui-core resize callback
+  stays spawned (`AsyncApp::update` re-entry deadlocks mid-update — tag .3
+  did it fully synchronously and froze the UI thread). Documented in
+  `/g/gpui-ce/MDRV.md` and `/x/m/v270/gpui-ce/gpui-ce.md` §6.

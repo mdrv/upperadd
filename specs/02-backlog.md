@@ -20,23 +20,21 @@ for v0.1.0 — items graduate into numbered specs only by owner decision.
 - **Image interactions** — click → open file in editor, wheel-zoom inside
   the pane, captions already render from alt text.
 
-## Selection & clipboard (approved design, spec 01 appendix)
+## Selection & clipboard
 
-- Shared selectable-text primitive for sticky body + overlay preview:
-  `index_for_position` hit-testing on wrapped layouts, `StyledText`
-  highlight for the selected range, mouse-up auto-copy to primary AND
-  clipboard, "Copied" chip ~1.5 s (timed show/hide only — no opacity fade,
-  §28). Overlay preview additionally copies on Ctrl+C.
-- Depends on: measuring wrapped-line geometry — check what
-  `TextLayout::index_for_position` needs (unwrapped vs wrapped index
-  mapping) before designing highlight runs across line breaks.
+~~Shared selectable-text primitive~~ **Shipped in v0.1.1** — block-level
+selection (`selection.rs` PaneSel) for sticky body + overlay preview;
+whole blocks are the unit (no glyph hit-testing yet). Mouse-up auto-copy
+to primary AND clipboard, "copied" chips (timed show/hide only — no
+opacity fade, §28). Overlay preview additionally copies on Ctrl+C.
+Remaining here: glyph-level (sub-block) selection via
+`index_for_position` hit-testing + highlight runs across line breaks.
 
 ## Stickies
 
-- **Auto-refresh on fs change** — ↻ is manual; the index worker already
-  watches files, so a `StickyChanged(path)` broadcast could refresh bound
-  stickies within the debounce window. Also enables the out-of-sync badge
-  (spec 01) when a file is deleted/renamed.
+- ~~**Auto-refresh on fs change**~~ **Shipped in v0.1.1** — stickies
+  subscribe to index-worker broadcasts (`IndexMsg::{Changed,Removed,
+  Reindexed}`); refresh + out-of-sync badge automatic, ↻ still forces.
 - **Persistence** — stickies die with the daemon by design (spec 01);
   revisit only if the owner wants session restore.
 - **Per-sticky zoom** — ctrl+wheel to scale body text; store per key.

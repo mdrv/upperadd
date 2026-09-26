@@ -163,19 +163,22 @@ impl Db {
         Ok(rows.first().and_then(|r| r["n"].as_u64()).unwrap_or(0))
     }
 
-    /// One section's content, for the preview pane.
-    pub fn section_content(&self, path: &str, line: u32) -> Result<Option<String>> {
+    /// One section's title + content, for the preview pane and stickies
+    /// (the title lets a sticky detect that its section moved).
+    pub fn section(&self, path: &str, line: u32) -> Result<Option<(String, String)>> {
         let rows = self.select(
-            format!("SELECT content FROM {SECTIONS} WHERE path = ? AND line = ?"),
+            format!("SELECT title, content FROM {SECTIONS} WHERE path = ? AND line = ?"),
             vec![
                 PortValue::Text(path.into()),
                 PortValue::Int(i64::from(line)),
             ],
         )?;
-        Ok(rows
-            .first()
-            .and_then(|r| r["content"].as_str())
-            .map(String::from))
+        Ok(rows.first().and_then(|r| {
+            Some((
+                r["title"].as_str()?.to_string(),
+                r["content"].as_str()?.to_string(),
+            ))
+        }))
     }
 
     /// Existing rows for one path as a hash → section_mtime carry map.

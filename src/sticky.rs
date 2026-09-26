@@ -3,16 +3,20 @@ use std::time::{Duration, Instant};
 
 use futures::channel::mpsc::UnboundedSender;
 use gpui::{
-    App, AppContext, Bounds, ClickEvent, Context, CursorStyle, InteractiveElement, MouseButton,
+    App, AppContext, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, InteractiveElement,
+    MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Size, Window,
     WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, hsla,
     layer_shell::*, point, prelude::*, px, size,
 };
 use log::debug;
 
+use futures::StreamExt;
+
 use crate::config::Config;
 use crate::markdown;
-use crate::worker::IndexCmd;
+use crate::selection::PaneSel;
+use crate::worker::{IndexCmd, IndexMsg};
 
 const DEFAULT_W: f32 = 420.0;
 const DEFAULT_H: f32 = 560.0;
@@ -191,6 +195,10 @@ pub struct Sticky {
     /// Markdown source of the bound section.
     body: String,
     index_tx: UnboundedSender<IndexCmd>,
+    /// Block selection state for the body (see selection.rs).
+    sel: PaneSel,
+    /// The bound section vanished or moved (amber footer badge).
+    out_of_sync: bool,
     cfg: Config,
 }
 
@@ -250,8 +258,23 @@ impl Sticky {
         key: (String, u32),
         body: String,
         index_tx: UnboundedSender<IndexCmd>,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> Self {
+        // Auto-refresh: the index worker broadcasts fs changes; when ours
+        // lands, re-fetch the bound section (↻ does the same on demand).
+        let (sub_tx, mut sub_rx) = futures::channel::mpsc::unbounded::<IndexMsg>();
+        let _ = index_tx.unbounded_send(IndexCmd::Subscribe { tx: sub_tx });
+        cx.spawn(async move |this, cx| {
+            while let Some(msg) = sub_rx.next().await {
+                if !this
+                    .update(cx, |s, cx| s.on_index_msg(msg, cx))
+                    .unwrap_or(false)
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
         Self {
             title,
             pos,
@@ -263,18 +286,115 @@ impl Sticky {
             key,
             body,
             index_tx,
+            sel: PaneSel::new(),
+            out_of_sync: false,
             cfg,
         }
     }
 
-    /// ↻: re-read the bound section via the index worker (fs-watch already
-    /// keeps the DB fresh; this pulls the latest into this sticky).
+    /// Markdown body: wheel-scrollable, block-selectable. Release copies
+    /// the selection to both clipboards (mouse-only sticky, spec 01).
+    fn render_body(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let blocks = markdown::parse(&self.body);
+        let base = self.note_dir();
+        let fonts = &self.cfg.fonts;
+        let pane_sel = &self.sel;
+        let items = blocks.iter().enumerate().map(|(ix, b)| {
+            markdown::render_block_div(b, &base, fonts, pane_sel.is_selected(ix))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this: &mut Self, _: &MouseDownEvent, _, cx| {
+                        this.sel.block_down(ix);
+                        // Keep the empty-space clear + gesture handlers out.
+                        cx.stop_propagation();
+                    }),
+                )
+                .on_mouse_move(cx.listener(
+                    move |this: &mut Self, _: &MouseMoveEvent, _, cx| {
+                        if this.sel.block_drag(ix) {
+                            cx.notify();
+                        }
+                    },
+                ))
+        });
+        div()
+            .id("sticky-body")
+            .flex_1()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_2p5()
+            .overflow_y_scroll()
+            .px(px(14.0))
+            .py(px(12.0))
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_body_clear))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_body_up))
+            .children(items)
+    }
+
+    /// Click on empty body space: drop the selection.
+    fn on_body_clear(&mut self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.sel.clear() {
+            cx.notify();
+        }
+    }
+
+    /// Release: copy the selection (primary + clipboard) and flash the chip.
+    fn on_body_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.sel.block_up() {
+            return;
+        }
+        let Some(range) = self.sel.sel_range() else {
+            return;
+        };
+        let text = markdown::copy_range(&markdown::parse(&self.body), range);
+        if text.is_empty() {
+            return;
+        }
+        let item = ClipboardItem::new_string(text);
+        cx.write_to_clipboard(item.clone());
+        cx.write_to_primary(item);
+        self.sel.copied();
+        cx.notify();
+        // Timed chip clear — never a fade (§28).
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(crate::selection::COPIED_CHIP)
+                .await;
+            this.update(cx, |_, cx| cx.notify()).ok();
+        })
+        .detach();
+    }
+
+    /// ↻: re-read the bound section (also fired automatically on fs events).
     fn on_sync(
         &mut self,
         _: &ClickEvent,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.request_refresh(cx);
+    }
+
+    /// A change event arrived; refresh when it touches our file.
+    fn on_index_msg(&mut self, msg: IndexMsg, cx: &mut Context<Self>) -> bool {
+        match msg {
+            IndexMsg::Changed { ref path } if *path == self.key.0 => self.request_refresh(cx),
+            IndexMsg::Removed { ref path } if *path == self.key.0 => {
+                self.out_of_sync = true;
+                cx.notify();
+            }
+            // A rebuild can shift heading lines anywhere.
+            IndexMsg::Reindexed => self.request_refresh(cx),
+            _ => {}
+        }
+        true
+    }
+
+    /// Pull the bound section's latest content into this sticky. A missing
+    /// section or a changed title (heading moved/renamed) flips the
+    /// out-of-sync badge instead of silently swapping content.
+    fn request_refresh(&mut self, cx: &mut Context<Self>) {
         let (tx, rx) = futures::channel::oneshot::channel();
         if self
             .index_tx
@@ -288,9 +408,16 @@ impl Sticky {
             return;
         }
         cx.spawn(async move |this, cx| {
-            if let Ok(Some(content)) = rx.await {
+            if let Ok(data) = rx.await {
                 this.update(cx, |s, cx| {
-                    s.body = content;
+                    match data {
+                        Some(d) if d.title == s.title => {
+                            s.body = d.content;
+                            s.out_of_sync = false;
+                        }
+                        Some(_) => s.out_of_sync = true,
+                        None => s.out_of_sync = true,
+                    }
                     cx.notify();
                 })
                 .ok();
@@ -520,9 +647,31 @@ impl Sticky {
             .child(
                 div()
                     .flex_1()
-                    .text_size(px(11.0))
-                    .text_color(hsla(0.0, 0.0, 1.0, 0.45))
-                    .child(format!("{}:{}", self.key.0, self.key.1 + 1)),
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(hsla(0.0, 0.0, 1.0, 0.45))
+                            .child(format!("{}:{}", self.key.0, self.key.1 + 1)),
+                    )
+                    .when(self.out_of_sync, |d| {
+                        d.child(
+                            div()
+                                .text_size(px(10.5))
+                                .text_color(hsla(28.0, 0.85, 0.62, 1.0))
+                                .child("out of sync"),
+                        )
+                    })
+                    .when(self.sel.chip_visible(), |d| {
+                        d.child(
+                            div()
+                                .text_size(px(10.5))
+                                .text_color(hsla(150.0, 0.5, 0.6, 1.0))
+                                .child("copied"),
+                        )
+                    }),
             )
     }
 
@@ -611,22 +760,7 @@ impl Render for Sticky {
             .on_mouse_move(cx.listener(Self::on_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_up))
             .child(self.render_header(cx))
-            .child(
-                // Markdown body (same pipeline as the preview pane), wheel-
-                // scrollable; overflow_y_scroll needs a stateful element.
-                div()
-                    .id("sticky-body")
-                    .flex_1()
-                    .w_full()
-                    .overflow_y_scroll()
-                    .px(px(14.0))
-                    .py(px(12.0))
-                    .child(markdown::render_blocks(
-                        &markdown::parse(&self.body),
-                        &self.note_dir(),
-                        &self.cfg.fonts,
-                    )),
-            )
+            .child(self.render_body(cx))
             .child(self.render_footer(cx))
             .child(self.render_edge(Edge::Left, cx))
             .child(self.render_edge(Edge::Right, cx))

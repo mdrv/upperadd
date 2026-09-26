@@ -10,7 +10,7 @@
 //! fork rule 5); remote images show a placeholder until an opt-in network
 //! round.
 
-use std::ops::Range;
+use std::ops::{Range, RangeInclusive};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -265,12 +265,32 @@ fn trim_tail(text: &mut String) {
 /// Render parsed blocks as a gap-separated column. Callers own the outer
 /// container (padding, scrolling); `base` is the directory relative image
 /// URLs resolve against (the note's directory).
-pub fn render_blocks(blocks: &[Block], base: &Path, fonts: &Fonts) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap_2p5()
-        .children(blocks.iter().map(|b| render_block(b, base, fonts)))
+/// One markdown block as an unwired div. `selected` tints it — the
+/// block-level text selection paints through this flag, and the pane owners
+/// attach their own mouse listeners (see selection.rs).
+pub fn render_block_div(block: &Block, base: &Path, fonts: &Fonts, selected: bool) -> Div {
+    let d = render_block(block, base, fonts);
+    if selected {
+        d.bg(hsla(220.0, 0.45, 0.55, 0.16)).rounded(px(4.0))
+    } else {
+        d
+    }
+}
+
+/// Plain-text form of a block range for the clipboard: styled blocks give
+/// their text, code the code, images their markdown; rules contribute
+/// nothing.
+pub fn copy_range(blocks: &[Block], range: RangeInclusive<usize>) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for b in blocks.iter().take(*range.end() + 1).skip(*range.start()) {
+        match b {
+            Block::Styled { text, .. } => parts.push(text.clone()),
+            Block::Code { code } => parts.push(code.clone()),
+            Block::Image { url, alt } => parts.push(format!("![{alt}]({url})")),
+            Block::Rule => {}
+        }
+    }
+    parts.join("\n\n")
 }
 
 /// Pick black or white for text on `bg` by the WCAG contrast ratio computed
@@ -295,13 +315,9 @@ pub fn contrast_text(bg: Hsla) -> Hsla {
     }
 }
 
-fn render_block(block: &Block, base: &Path, fonts: &Fonts) -> AnyElement {
+fn render_block(block: &Block, base: &Path, fonts: &Fonts) -> Div {
     match block {
-        Block::Rule => div()
-            .h(px(1.0))
-            .w_full()
-            .bg(hsla(0.0, 0.0, 1.0, 0.12))
-            .into_any_element(),
+        Block::Rule => div().h(px(1.0)).w_full().bg(hsla(0.0, 0.0, 1.0, 0.12)),
         Block::Code { code } => div()
             .font_family(fonts.monospace.clone())
             .text_size(px(11.5))
@@ -310,9 +326,8 @@ fn render_block(block: &Block, base: &Path, fonts: &Fonts) -> AnyElement {
             .rounded(px(6.0))
             .px(px(10.0))
             .py(px(8.0))
-            .child(code.clone())
-            .into_any_element(),
-        Block::Image { url, alt } => render_image(url, alt, base),
+            .child(code.clone()),
+        Block::Image { url, alt } => div().child(render_image(url, alt, base)),
         Block::Styled { kind, text, spans } => {
             let family = match kind {
                 BlockKind::Heading(_) => fonts.heading.clone(),
@@ -353,9 +368,8 @@ fn render_block(block: &Block, base: &Path, fonts: &Fonts) -> AnyElement {
                             .child("•"),
                     )
                     .child(block)
-                    .into_any_element()
             } else {
-                block.into_any_element()
+                block
             }
         }
     }

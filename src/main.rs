@@ -6,6 +6,7 @@ mod index;
 mod markdown;
 mod overlay;
 mod search;
+mod selection;
 mod sticky;
 mod worker;
 

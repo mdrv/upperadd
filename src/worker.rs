@@ -33,11 +33,16 @@ pub enum IndexCmd {
     Stats {
         resp: oneshot::Sender<String>,
     },
-    /// One section's content for the preview pane.
+    /// One section's content for the preview pane and stickies. The title
+    /// rides along so a sticky can detect that its section moved.
     Section {
         path: String,
         line: u32,
-        resp: oneshot::Sender<Option<String>>,
+        resp: oneshot::Sender<Option<SectionData>>,
+    },
+    /// Register a change-event subscriber (stickies auto-refresh via this).
+    Subscribe {
+        tx: UnboundedSender<IndexMsg>,
     },
     /// Toggle pin-at-top for a section (workspace state, DB-backed).
     TogglePin {
@@ -50,6 +55,24 @@ pub enum IndexCmd {
         line: u32,
         up: bool,
     },
+}
+
+/// Fetched section payload: title + markdown source.
+#[derive(Clone, Debug)]
+pub struct SectionData {
+    pub title: String,
+    pub content: String,
+}
+
+/// Change events pushed to subscribers (stickies re-fetch on these).
+#[derive(Clone, Debug)]
+pub enum IndexMsg {
+    /// A note file was (re)indexed.
+    Changed { path: String },
+    /// A note file vanished.
+    Removed { path: String },
+    /// The whole index was rebuilt (lines may have shifted everywhere).
+    Reindexed,
 }
 
 #[derive(Clone, Debug)]
@@ -150,6 +173,7 @@ fn drain_degraded(mut rx: UnboundedReceiver<IndexCmd>) {
             IndexCmd::Section { resp, .. } => {
                 let _ = resp.send(None);
             }
+            IndexCmd::Subscribe { .. } => {}
             IndexCmd::Reindex | IndexCmd::FilesChanged(_) => {}
             IndexCmd::TogglePin { .. } | IndexCmd::MovePin { .. } => {}
         }
@@ -179,6 +203,8 @@ struct Worker {
     /// Pinned sections of the default workspace, user-defined order.
     /// DB-backed (survives restarts); pruned against the corpus.
     pinned: Vec<(String, u32)>,
+    /// Sticky-note subscribers receiving IndexMsg change events.
+    subs: Vec<UnboundedSender<IndexMsg>>,
     /// True while the table has never been populated: fresh sections fall
     /// back to the file mtime instead of "now".
     cold: bool,
@@ -193,6 +219,7 @@ impl Worker {
             db,
             corpus: Vec::new(),
             pinned: Vec::new(),
+            subs: Vec::new(),
             cold,
         }
     }
@@ -228,9 +255,15 @@ impl Worker {
                 let _ = resp.send(self.search(&query));
             }
             IndexCmd::Section { path, line, resp } => {
-                let content = self.db.section_content(&path, line).ok().flatten();
-                let _ = resp.send(content);
+                let data = self
+                    .db
+                    .section(&path, line)
+                    .ok()
+                    .flatten()
+                    .map(|(title, content)| SectionData { title, content });
+                let _ = resp.send(data);
             }
+            IndexCmd::Subscribe { tx } => self.subs.push(tx),
             IndexCmd::TogglePin { path, line } => self.toggle_pin(path, line),
             IndexCmd::MovePin { path, line, up } => self.move_pin(path, line, up),
             IndexCmd::Stats { resp } => {
@@ -246,6 +279,7 @@ impl Worker {
             self.db.delete_path(&rel)?;
             self.corpus.retain(|m| m.path != rel);
             self.retain_valid_pins();
+            self.broadcast(IndexMsg::Removed { path: rel.clone() });
             info!("index: removed {rel}");
             return Ok(());
         }
@@ -253,8 +287,15 @@ impl Worker {
         self.db.replace_file(&rows)?;
         self.refresh_corpus_for(&rel, &rows);
         self.cold = false;
+        self.broadcast(IndexMsg::Changed { path: rel.clone() });
         debug!("index: {} ({} sections)", rel, rows.len());
         Ok(())
+    }
+
+    /// Push a change event to all live subscribers, dropping the dead ones.
+    fn broadcast(&mut self, msg: IndexMsg) {
+        self.subs
+            .retain(|tx| tx.unbounded_send(msg.clone()).is_ok());
     }
 
     fn rows_for_file(&self, abs: &Path, rel: &str) -> Result<Vec<crate::db::SectionRow>> {
@@ -289,6 +330,7 @@ impl Worker {
         }
         self.cold = false;
         self.reload_corpus()?;
+        self.broadcast(IndexMsg::Reindexed);
         info!(
             "index: {} sections across {} files (cold={})",
             sections,
@@ -318,6 +360,7 @@ impl Worker {
         }
         self.cold = false;
         self.reload_corpus()?;
+        self.broadcast(IndexMsg::Reindexed);
         info!(
             "reindexed {} sections across {} files in {:?}",
             sections,

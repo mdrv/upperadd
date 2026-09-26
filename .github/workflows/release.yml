@@ -23,7 +23,9 @@ jobs:
             container: archlinux:base-devel
             arch: x86_64
           - runner: ubuntu-24.04-arm
-            container: archlinuxarm:base-devel
+            # archlinuxarm's Docker Hub image pulls fail on GH runners; the
+            # mainline archlinux image is multi-arch (arm64 included).
+            container: archlinux:base-devel
             arch: aarch64
     runs-on: ${{ matrix.runner }}
     container:
@@ -33,7 +35,7 @@ jobs:
     steps:
       - name: Install toolchain
         run: |
-          pacman -Syu --noconfirm git rustup fontconfig pkgconf
+          pacman -Syu --noconfirm git rustup fontconfig pkgconf libxcb libxkbcommon libxkbcommon-x11 wayland
           rustup default stable
       - uses: actions/checkout@v7
       - name: Build

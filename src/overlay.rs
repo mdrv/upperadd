@@ -5,13 +5,15 @@ use std::path::Path;
 use futures::channel::mpsc::UnboundedSender;
 use gpui::{
     div, hsla, layer_shell::KeyboardInteractivity, prelude::*, px, relative, uniform_list, white,
-    Context, FocusHandle, Global, InteractiveElement, KeyDownEvent, Pixels, Point, Render,
-    ScrollStrategy, UniformListScrollHandle, Window, WindowHandle,
+    ClipboardItem, Context, FocusHandle, Global, InteractiveElement, KeyDownEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, ScrollStrategy,
+    UniformListScrollHandle, Window, WindowHandle,
 };
 
 use crate::config::Config;
 use crate::markdown;
 use crate::search::{Mode, SearchModel};
+use crate::selection::PaneSel;
 use crate::worker::IndexCmd;
 
 /// App-global handle to the persistent overlay window (§16.9: exactly one,
@@ -36,6 +38,8 @@ pub struct Overlay {
     preview: Option<((String, u32), String)>,
     /// Transient status-bar feedback: (message, shown-at).
     notice: Option<(&'static str, Instant)>,
+    /// Block selection state for the preview pane (see selection.rs).
+    pane_sel: PaneSel,
 }
 
 impl Overlay {
@@ -56,6 +60,7 @@ impl Overlay {
             pins: 0,
             preview: None,
             notice: None,
+            pane_sel: PaneSel::new(),
         }
     }
 
@@ -179,6 +184,14 @@ impl Overlay {
                 .and_then(|s| s.chars().next())
                 .filter(|c| !c.is_control())
         };
+
+        // Ctrl+C works in both modes: copy the preview selection.
+        if mods.control && ks.key == "c" {
+            self.copy_preview_selection(cx);
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
 
         match self.search.mode {
             Mode::Insert => {
@@ -348,6 +361,8 @@ impl Overlay {
         {
             return;
         }
+        // New section → stale block indices; drop the selection.
+        self.pane_sel.clear();
         let (tx, rx) = futures::channel::oneshot::channel();
         if self
             .index_tx
@@ -361,7 +376,7 @@ impl Overlay {
             return;
         }
         cx.spawn(async move |this, cx| {
-            if let Ok(content) = rx.await {
+            if let Ok(data) = rx.await {
                 this.update(cx, |ov, cx| {
                     let still_selected = ov
                         .search
@@ -369,12 +384,41 @@ impl Overlay {
                         .get(ov.search.selected)
                         .is_some_and(|h| (h.path.clone(), h.line) == key);
                     if still_selected {
-                        ov.preview = Some((key, content.unwrap_or_default()));
+                        ov.preview = Some((key, data.map(|d| d.content).unwrap_or_default()));
                         cx.notify();
                     }
                 })
                 .ok();
             }
+        })
+        .detach();
+    }
+
+    /// Ctrl+C: copy the currently selected preview blocks as plain text.
+    fn copy_preview_selection(&mut self, cx: &mut Context<Self>) {
+        let Some((_, content)) = &self.preview else {
+            return;
+        };
+        let Some(range) = self.pane_sel.sel_range() else {
+            return;
+        };
+        let text = markdown::copy_range(&markdown::parse(content), range);
+        let item = ClipboardItem::new_string(text);
+        cx.write_to_clipboard(item.clone());
+        cx.write_to_primary(item);
+        self.notice = Some(("copied", Instant::now()));
+        // Timed clear — never a fade (§28 animation-freeze rule).
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(crate::selection::COPIED_CHIP)
+                .await;
+            this.update(cx, |ov, cx| {
+                if ov.notice.is_some_and(|(t, _)| t == "copied") {
+                    ov.notice = None;
+                }
+                cx.notify();
+            })
+            .ok();
         })
         .detach();
     }
@@ -444,7 +488,6 @@ impl Overlay {
         };
         self.pins += 1;
         let index = self.pins;
-        let title = hit.title.clone();
         let key = (hit.path.clone(), hit.line);
         let cfg = self.cfg.clone();
         let origin = self.origin;
@@ -462,12 +505,14 @@ impl Overlay {
             return;
         }
         cx.spawn(async move |_, cx| {
-            let Ok(Some(content)) = rx.await else {
+            let Ok(Some(data)) = rx.await else {
                 log::warn!("pin: section vanished before fetch ({})", key.0);
                 return;
             };
             if let Err(err) = cx.update(|app| {
-                crate::sticky::spawn(app, &cfg, title, index, origin, key, content, index_tx)
+                crate::sticky::spawn(
+                    app, &cfg, data.title, index, origin, key, data.content, index_tx,
+                )
             }) {
                 log::warn!("spawning sticky: {err:#}");
             }
@@ -659,7 +704,7 @@ impl Overlay {
             .unwrap_or_else(|| self.cfg.notes.dir.clone())
     }
 
-    fn render_preview(&self) -> gpui::AnyElement {
+    fn render_preview(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(((path, _), content)) = &self.preview else {
             return div()
                 .flex_1()
@@ -677,17 +722,53 @@ impl Overlay {
         };
         let base = self.note_dir(path);
         let blocks = markdown::parse(content);
+        let fonts = &self.cfg.fonts;
+        let pane_sel = &self.pane_sel;
+        let items = blocks.iter().enumerate().map(|(ix, b)| {
+            markdown::render_block_div(b, &base, fonts, pane_sel.is_selected(ix))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this: &mut Self, _: &MouseDownEvent, _, cx| {
+                        this.pane_sel.block_down(ix);
+                        // Keep the container's clear-handler out of it.
+                        cx.stop_propagation();
+                    }),
+                )
+                .on_mouse_move(cx.listener(
+                    move |this: &mut Self, _: &MouseMoveEvent, _, cx| {
+                        if this.pane_sel.block_drag(ix) {
+                            cx.notify();
+                        }
+                    },
+                ))
+        });
         div()
             .id("preview")
             .flex_1()
             .h_full()
             .flex()
             .flex_col()
+            .gap_2p5()
             .px(px(20.0))
             .py(px(16.0))
             .overflow_y_scroll()
-            .child(markdown::render_blocks(&blocks, &base, &self.cfg.fonts))
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_preview_clear))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_preview_up))
+            .children(items)
             .into_any_element()
+    }
+
+    /// Click on empty preview space: drop the selection.
+    fn on_preview_clear(&mut self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.pane_sel.clear() {
+            cx.notify();
+        }
+    }
+
+    fn on_preview_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.pane_sel.block_up() {
+            cx.notify();
+        }
     }
 }
 
@@ -729,7 +810,7 @@ impl Render for Overlay {
                     .text_color(white())
                     // fzf layout (spec 00): left search+results, right preview.
                     .child(self.render_left_panel(cx))
-                    .child(self.render_preview()),
+                    .child(self.render_preview(cx)),
             )
     }
 }

@@ -2,7 +2,7 @@
 
 Findings from upperadd M1 + M1.5 (2026-09-25), fork at
 `mdrv-gpui-0.0.260925.1`. These supersede the "doc-era" caveats in
-`/x/m/v270/gpui-ce/gpui-ce.md` §16.
+`/x/m/v270/gpui-ce/10-practical-api.md` §16.
 
 ## `Window::set_visible` works on layer surfaces (verified)
 

@@ -38,7 +38,8 @@ arrayref = { path = "/g/gpui-ce/vendor/arrayref" } # crates.io arrayref is yanke
   must always build). Same convention as mdrv-ds-{clock,legend,shell,overlay,launcher}.
 - Package renames are NOT optional: crates.io names are `gpui-ce` /
   `gpui_ce_platform`; lib names stay `gpui` / `gpui_platform`.
-- Read `/x/m/v270/gpui-ce/gpui-ce.md` (practical fork API docs) BEFORE
+- Read `/x/m/v270/gpui-ce/` (practical fork API docs; start at
+  `00-overview.md`) BEFORE
   writing any gpui code. §6 = layer-shell, §19 = z-order, §20 =
   gamepad-driven panel pattern, §28 = animation-freeze known issue.
 - mdrv-db docs: `/x/m/v270/mdrv-db/` (01-architecture, 02-engine-api —

@@ -8,7 +8,7 @@ Read, in order, before writing any code:
    mdrv-db rules, verification gates, house style, out-of-scope list.
 2. `specs/00-v0.1.0-spec.md` — the decided design. It is the contract;
    deviate only after asking.
-3. `/x/m/v270/gpui-ce/gpui-ce.md` — practical gpui-ce fork docs (§6
+3. `/x/m/v270/gpui-ce/10-practical-api.md` — practical gpui-ce fork docs (§6
    layer-shell, §19 z-order, §28 animation freeze).
 4. `/x/m/v270/mdrv-db/01-architecture.md` + `02-engine-api.md` — the DB
    you embed (Rust engine crate, TS-flavored API docs but same ops model).

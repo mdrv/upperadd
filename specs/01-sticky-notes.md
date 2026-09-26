@@ -26,7 +26,7 @@ be pinned at once. A sticky never takes the keyboard
   pointer-leave detected from the same rect check with a 250 ms grace.
   Event-driven drag wiggles (surface-local coords + commit-rate mismatch)
   and stalls on flings — pattern documented in
-  `/x/m/v270/gpui-ce/gpui-ce.md` §6 and `docs/01`.
+  `/x/m/v270/gpui-ce/10-practical-api.md` §6 and `docs/01`.
 - **Window shape**: `Layer::Top`, `Anchor::TOP | Anchor::LEFT`
   (`Anchor::empty()` misbehaves — compositors center unanchored layer
   surfaces), `exclusive_zone: -1`,
@@ -89,7 +89,7 @@ be pinned at once. A sticky never takes the keyboard
   sizes with old buffers → border smear); the gpui-core resize callback
   stays spawned (`AsyncApp::update` re-entry deadlocks mid-update — tag .3
   did it fully synchronously and froze the UI thread). Documented in
-  `/g/gpui-ce/MDRV.md` and `/x/m/v270/gpui-ce/gpui-ce.md` §6.
+  `/g/gpui-ce/MDRV.md` and `/x/m/v270/gpui-ce/20-dragging-panels.md`.
 
 ## Update 2026-09-25 — text selection (lands with M3)
 

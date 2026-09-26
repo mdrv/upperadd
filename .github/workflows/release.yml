@@ -1,8 +1,9 @@
 # Release pipeline: build x86_64 + aarch64 Linux binaries for a `v*` tag
-# and attach tarballs to a GitHub Release. Builds run inside Arch containers
-# (native arch per runner) so the binaries match the glibc of the alarm pacman
-# repo's consumers — NOT musl: the gpui fork's wayland/wgpu stack on musl is
-# uncharted.
+# and attach tarballs to a GitHub Release. x86_64 builds inside an Arch
+# container so the binary matches the glibc of the alarm pacman repo's
+# consumers — NOT musl: the gpui fork's wayland/wgpu stack on musl is
+# uncharted. aarch64 builds on a plain ARM runner (Docker Hub pulls fail
+# on GH ARM runners); Ubuntu 24.04's older glibc keeps it Arch-compatible.
 name: release
 
 on:
@@ -23,20 +24,28 @@ jobs:
             container: archlinux:base-devel
             arch: x86_64
           - runner: ubuntu-24.04-arm
-            # archlinuxarm's Docker Hub image pulls fail on GH runners; the
-            # mainline archlinux image is multi-arch (arm64 included).
-            container: archlinux:base-devel
+            # No container here: GH's ARM runners persistently fail to pull
+            # from Docker Hub (21 retries). Plain Ubuntu works; a binary
+            # linked against Ubuntu 24.04's older glibc runs fine on Arch.
+            container: ""
             arch: aarch64
     runs-on: ${{ matrix.runner }}
-    container:
-      image: ${{ matrix.container }}
+    container: ${{ matrix.container != '' && matrix.container || null }}
     env:
       ARCH: ${{ matrix.arch }}
     steps:
-      - name: Install toolchain
+      - name: Install toolchain (Arch container, x86_64)
+        if: ${{ matrix.arch == 'x86_64' }}
         run: |
           pacman -Syu --noconfirm git rustup fontconfig pkgconf libxcb libxkbcommon libxkbcommon-x11 wayland
           rustup default stable
+      - name: Install toolchain (Ubuntu runner, aarch64)
+        if: ${{ matrix.arch == 'aarch64' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwayland-dev libxkbcommon-dev libfontconfig1-dev
+          rustup update stable || (curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable)
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: actions/checkout@v7
       - name: Build
         run: cargo build --release

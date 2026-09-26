@@ -40,14 +40,14 @@ jobs:
         run: cargo build --release
       - name: Package
         run: |
-          ver="${GITHUB_REF_NAME#v}"
           mkdir -p "pkg/upperadd" dist
           cp target/release/upperadd pkg/upperadd/
           cp README.md LICENSE pkg/upperadd/
           # Packaged installs run from /usr/bin, not the dev checkout.
           sed 's#/x/g/upperadd/target/release/upperadd#/usr/bin/upperadd#' \
             dist/upperadd.service > pkg/upperadd/upperadd.service
-          tar -czf "dist/upperadd-${ver}-linux-${ARCH}.tar.gz" -C pkg upperadd
+          # Owner-chosen naming: upperadd-v0.1.1-aarch64-unknown-linux-gnu.tar.gz
+          tar -czf "dist/upperadd-${GITHUB_REF_NAME}-${ARCH}-unknown-linux-gnu.tar.gz" -C pkg upperadd
       - uses: actions/upload-artifact@v7
         with:
           name: linux-${{ matrix.arch }}
